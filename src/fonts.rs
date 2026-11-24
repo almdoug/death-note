@@ -129,11 +129,26 @@ pub fn install(ctx: &egui::Context) -> FontCaps {
     let has_bi = add(&mut defs, BOLD_ITALIC, "bold_italic");
     let has_mono = add(&mut defs, "dn-mono", "mono");
 
+    // Ícones (Phosphor): família própria e também logo após a fonte principal
+    // de cada família, para poder misturar ícone e texto no mesmo rótulo.
+    defs.font_data.insert(
+        crate::icons::FAMILY.to_owned(),
+        Arc::new(FontData::from_static(crate::icons::FONT_BYTES).tweak(egui::FontTweak {
+            y_offset_factor: 0.08,
+            ..Default::default()
+        })),
+    );
+    defs.families.insert(
+        FontFamily::Name(crate::icons::FAMILY.into()),
+        vec![crate::icons::FAMILY.to_owned()],
+    );
+
     let chain = |primary: Option<&str>| -> Vec<String> {
         let mut v = Vec::new();
         if let Some(p) = primary {
             v.push(p.to_owned());
         }
+        v.push(crate::icons::FAMILY.to_owned());
         if has_regular && primary != Some("dn-regular") {
             v.push("dn-regular".to_owned());
         }

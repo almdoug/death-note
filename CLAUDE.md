@@ -13,6 +13,19 @@ cargo run --example make_icon    # regenera assets/icon.ico a partir de src/icon
 iscc /DAppVersion=X.Y.Z installer\death-note.iss   # instalador em dist/ (Inno Setup 6)
 ```
 
+### Ícones
+A interface usa **somente** ícones Phosphor (`src/icons.rs`), nunca emoji nem símbolos
+Unicode. `assets/phosphor-icons.ttf` é um subconjunto da fonte Phosphor Regular (MIT,
+`assets/phosphor-LICENSE.txt`). Para incluir um ícone novo: pegue o código em
+`codepoints.rs` do crate `egui-phosphor`, acrescente-o à lista e regenere:
+
+```sh
+python -m fontTools.subset Phosphor.ttf --unicodes=<lista atual + novo> \
+  --no-hinting --desubroutinize --output-file=assets/phosphor-icons.ttf
+```
+
+A lista atual de códigos é a das constantes em `src/icons.rs`.
+
 Ao rodar o app para testar, **sempre** use uma pasta de dados separada, para não
 mexer nas notas reais do usuário (`%APPDATA%\DeathNote`):
 

@@ -48,19 +48,54 @@ pub fn style_titlebar(frame: &eframe::Frame, caption: Color32, text: Color32, da
 pub fn style_titlebar(_frame: &eframe::Frame, _caption: Color32, _text: Color32, _dark: bool) {}
 
 /// Tenta trazer para frente a janela de uma instância já aberta.
+/// O título é "Death Note" ou "<nota> — Death Note".
 #[cfg(windows)]
 pub fn focus_existing_window(title: &str) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SW_RESTORE, SetForegroundWindow, ShowWindow,
+        EnumWindows, GetWindowTextW, IsIconic, IsWindowVisible, SW_RESTORE,
+        SetForegroundWindow, ShowWindow,
     };
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+
+    struct Search {
+        exact: String,
+        suffix: String,
+        found: HWND,
+    }
+
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let search = unsafe { &mut *(lparam as *mut Search) };
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return 1;
+        }
+        let mut buf = [0u16; 512];
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len <= 0 {
+            return 1;
+        }
+        let text = String::from_utf16_lossy(&buf[..len as usize]);
+        if text == search.exact || text.ends_with(&search.suffix) {
+            search.found = hwnd;
+            return 0; // para a enumeração
+        }
+        1
+    }
+
+    let mut search = Search {
+        exact: title.to_string(),
+        suffix: format!(" — {title}"),
+        found: std::ptr::null_mut(),
+    };
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
+        EnumWindows(Some(visit), &mut search as *mut Search as LPARAM);
+        if search.found.is_null() {
             return false;
         }
-        ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
+        // Só restaura se estiver minimizada (SW_RESTORE tiraria uma janela do modo maximizado).
+        if IsIconic(search.found) != 0 {
+            ShowWindow(search.found, SW_RESTORE);
+        }
+        SetForegroundWindow(search.found);
     }
     true
 }

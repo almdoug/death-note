@@ -6,6 +6,7 @@ mod doc;
 mod editor;
 mod fonts;
 mod icon;
+mod icons;
 mod ipc;
 mod platform;
 mod storage;

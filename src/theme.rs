@@ -107,6 +107,21 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
+/// Razão de contraste WCAG entre duas cores.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    fn lin(v: u8) -> f32 {
+        let v = v as f32 / 255.0;
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    let l = |c: Color32| 0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b());
+    let (x, y) = (l(a), l(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
 fn luminance(c: Color32) -> f32 {
     (0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32) / 255.0
 }
@@ -136,7 +151,7 @@ impl Colors {
                 dim: Color32::from_rgb(110, 113, 122),
                 border: Color32::from_rgb(222, 224, 229),
                 accent,
-                code_bg: Color32::from_rgb(240, 241, 244),
+                code_bg: Color32::from_rgb(232, 234, 240),
             }
         };
         if let Some(bg) = settings.custom_bg {
@@ -189,6 +204,30 @@ impl Colors {
             .unwrap_or(Color32::TRANSPARENT)
     }
 
+    /// Destaque usado como TEXTO: aproxima da cor do texto até ter
+    /// contraste de pelo menos 4,5:1 sobre a superfície (WCAG AA).
+    /// O destaque puro fica para preenchimentos.
+    pub fn accent_text(&self) -> Color32 {
+        let base = if self.dark { self.surface } else { self.bg };
+        let mut t = 0.0;
+        while t < 0.9 {
+            let c = mix(self.accent, self.text, t);
+            if contrast(c, base) >= 4.5 && contrast(c, self.panel) >= 4.5 {
+                return c;
+            }
+            t += 0.05;
+        }
+        self.text
+    }
+
+    pub fn danger(&self) -> Color32 {
+        if self.dark {
+            Color32::from_rgb(255, 120, 120)
+        } else {
+            Color32::from_rgb(200, 40, 40)
+        }
+    }
+
     /// Cor de texto legível sobre a cor de destaque.
     pub fn on_accent(&self) -> Color32 {
         if luminance(self.accent) > 0.6 {
@@ -220,7 +259,8 @@ fn style_for(style: &mut egui::Style, c: &Colors, settings: &Settings) {
     };
     v.panel_fill = c.bg;
     v.window_fill = c.surface;
-    v.extreme_bg_color = c.bg;
+    v.extreme_bg_color = if c.dark { mix(c.surface, Color32::BLACK, 0.25) } else { c.bg };
+    v.text_edit_bg_color = Some(if c.dark { mix(c.surface, Color32::BLACK, 0.25) } else { c.bg });
     v.faint_bg_color = mix(c.bg, c.text, 0.04);
     v.code_bg_color = c.code_bg;
     v.hyperlink_color = c.accent;
@@ -241,6 +281,7 @@ fn style_for(style: &mut egui::Style, c: &Colors, settings: &Settings) {
     };
     v.selection.bg_fill = mix(c.bg, c.accent, if c.dark { 0.45 } else { 0.30 });
     v.selection.stroke = Stroke::new(1.0, c.text);
+    v.hyperlink_color = c.accent_text();
     v.text_cursor.stroke = Stroke::new(2.0, c.accent);
     v.text_cursor.blink = settings.cursor_blink;
     v.override_text_color = None;
@@ -253,9 +294,10 @@ fn style_for(style: &mut egui::Style, c: &Colors, settings: &Settings) {
     v.widgets.noninteractive.weak_bg_fill = c.surface;
     v.widgets.noninteractive.corner_radius = rounding;
 
-    v.widgets.inactive.bg_fill = mix(c.surface, c.text, 0.06);
-    v.widgets.inactive.weak_bg_fill = mix(c.surface, c.text, 0.05);
-    v.widgets.inactive.bg_stroke = Stroke::NONE;
+    v.widgets.inactive.bg_fill = mix(c.surface, c.text, if c.dark { 0.07 } else { 0.04 });
+    v.widgets.inactive.weak_bg_fill = mix(c.surface, c.text, if c.dark { 0.06 } else { 0.045 });
+    // Contorno sutil: sem ele, caixas de seleção e campos somem no tema claro.
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, mix(c.border, c.text, 0.10));
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, c.text);
     v.widgets.inactive.corner_radius = rounding;
 
@@ -280,10 +322,13 @@ fn style_for(style: &mut egui::Style, c: &Colors, settings: &Settings) {
 
     style.visuals = v;
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.window_margin = Margin::same(16);
     style.spacing.menu_margin = Margin::same(6);
-    style.spacing.interact_size.y = 26.0;
+    style.spacing.interact_size.y = 28.0;
+    style.spacing.icon_width = 16.0;
+    style.spacing.icon_width_inner = 9.0;
+    style.spacing.icon_spacing = 8.0;
     style.spacing.scroll.bar_width = 8.0;
     style.spacing.scroll.floating = true;
     style.interaction.selectable_labels = false;

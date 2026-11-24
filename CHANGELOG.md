@@ -3,6 +3,27 @@
 Todas as mudanças visíveis para quem usa o Death Note. A seção de cada versão
 vira o texto do release no GitHub e aparece na janela de atualização do app.
 
+## [0.3.0] - 2026-11-23
+
+### Correções
+- O app travava ao abrir se todas as abas tivessem sido fechadas antes. Agora abre normalmente, com as notas fechadas preservadas.
+- Com muitas abas, uma barra de rolagem cobria o topo do texto; títulos longos ocupavam a barra inteira.
+- O divisor da tela dividida era difícil de pegar e deixava um painel ser esmagado até sumir.
+- Na janela estreita, os textos da barra de status se sobrepunham.
+- Textos na cor de destaque, código no tema claro e caixas de seleção agora têm contraste suficiente.
+
+### Melhorias
+- Ícones novos e consistentes em todo o app, no lugar de emojis e símbolos.
+- Barra de formatação: as cores e o marca-texto aparecem no lugar dos botões, sem cobrir o texto acima; mostra a cor atual e o marca-texto como fica aplicado.
+- Busca na nota (Ctrl+F) compacta, flutuando no canto, sem empurrar o texto.
+- Busca rápida (Ctrl+P) fixa no topo, com o termo destacado e a nota atual marcada.
+- Configurações reorganizadas, com lista completa de atalhos e confirmação antes de restaurar os padrões.
+- Renomear já abre com o nome selecionado.
+- Avisos ao fechar, reabrir e copiar como Markdown; indicação do estilo pendente (ex.: negrito ativado sem seleção).
+- Notas novas vazias levam a hora no nome; o título da janela mostra a nota aberta.
+- Na tela dividida, uma linha colorida indica o painel em foco.
+- Cursor de mão sobre as caixinhas de checklist.
+
 ## [0.2.0] - 2026-11-23
 
 ### Novidades
