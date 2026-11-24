@@ -92,8 +92,9 @@ Root: HKA; Subkey: "Software\Classes\*\shell\DeathNote"; ValueType: string; Valu
 Root: HKA; Subkey: "Software\Classes\*\shell\DeathNote"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\DeathNote\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
 
-; Permite abrir pelo Executar (Win+R): death-note
-Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\{#AppExe}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe}"; Flags: uninsdeletekey
+; Permite abrir pelo Executar (Win+R) digitando "dnote"
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dnote.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dnote.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

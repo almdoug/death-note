@@ -24,7 +24,7 @@ Não precisa de administrador (instala em `%LOCALAPPDATA%\Programs\Death Note`).
 - cria o atalho no **Menu Iniciar** (é só pesquisar "Death Note") e, se quiser, na área de trabalho;
 - adiciona **"Abrir com Death Note"** ao menu de contexto dos arquivos (no Windows 11 fica em "Mostrar mais opções");
 - faz os arquivos `.dnote` abrirem no Death Note e coloca o app em "Abrir com" para `.txt` e `.md`;
-- permite abrir pelo Executar (`Win+R` → `death-note`).
+- permite abrir pelo Executar (`Win+R` → `dnote`).
 
 Abrir um arquivo com o app já aberto leva o arquivo para a janela existente.
 Desinstalar pelo Windows não apaga suas notas (ficam em `%APPDATA%\DeathNote`).

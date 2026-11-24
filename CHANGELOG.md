@@ -7,6 +7,7 @@ vira o texto do release no GitHub e aparece na janela de atualização do app.
 
 ### Novidades
 - Instalador para Windows: atalho no Menu Iniciar, "Abrir com Death Note" no menu de contexto, arquivos `.dnote` abrem direto no app e o Death Note aparece em "Abrir com" para `.txt` e `.md`.
+- Abra o app pelo Executar: `Win+R` → `dnote`.
 - Atualização automática: o app avisa quando há uma versão nova, baixa, confere e instala sozinho, reabrindo em seguida.
 - Abrir um arquivo com o app já aberto agora leva o arquivo para a janela existente.
 - Novo ícone.
