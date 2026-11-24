@@ -201,9 +201,15 @@ pub fn read_file(path: &Path) -> Result<(String, Doc), String> {
             let title = if f.title.is_empty() { stem } else { f.title };
             Ok((title, Doc::from_data(f.doc)))
         }
-        FileKind::Markdown => Ok((stem, Doc::from_markdown(&String::from_utf8_lossy(&bytes)))),
-        FileKind::Text => Ok((stem, Doc::from_plain(&String::from_utf8_lossy(&bytes)))),
+        FileKind::Markdown => Ok((stem, Doc::from_markdown(&decode_text(&bytes)))),
+        FileKind::Text => Ok((stem, Doc::from_plain(&decode_text(&bytes)))),
     }
+}
+
+/// Texto UTF-8 sem o BOM que muitos editores do Windows gravam no início.
+fn decode_text(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 // --------------------------------------------------------- Instância única

@@ -27,6 +27,8 @@ pub struct Settings {
     pub always_on_top: bool,
     pub show_status_bar: bool,
     pub auto_lists: bool,
+    /// Procurar novas versões no GitHub ao abrir o app.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +45,7 @@ impl Default for Settings {
             always_on_top: false,
             show_status_bar: true,
             auto_lists: true,
+            check_updates: true,
         }
     }
 }
@@ -263,10 +266,12 @@ fn style_for(style: &mut egui::Style, c: &Colors, settings: &Settings) {
     v.widgets.hovered.corner_radius = rounding;
     v.widgets.hovered.expansion = 0.0;
 
-    v.widgets.active.bg_fill = c.accent;
+    v.widgets.active.bg_fill = mix(c.surface, c.accent, 0.45);
     v.widgets.active.weak_bg_fill = mix(c.bg, c.accent, 0.35);
     v.widgets.active.bg_stroke = Stroke::new(1.0, c.accent);
-    v.widgets.active.fg_stroke = Stroke::new(1.5, c.on_accent());
+    // fg_stroke do estado "active" também é a cor de `strong_text_color()`:
+    // precisa ser a cor do texto, senão títulos em negrito somem no tema claro.
+    v.widgets.active.fg_stroke = Stroke::new(1.5, c.text);
     v.widgets.active.corner_radius = rounding;
     v.widgets.active.expansion = 0.0;
 

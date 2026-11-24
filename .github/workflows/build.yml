@@ -16,16 +16,64 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      - name: Ler versão do Cargo.toml
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "VERSION=$v" >> $env:GITHUB_ENV
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "A tag ${{ github.ref_name }} não bate com a versão do Cargo.toml ($v)"
+          }
+
       - name: Testes
         run: cargo test --release
+
       - name: Build release
         run: cargo build --release
+
+      - name: Instalar Inno Setup (se necessário)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+
+      - name: Gerar instalador, portátil e checksums
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$env:VERSION" installer\death-note.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC falhou" }
+          Copy-Item target\release\death-note.exe "dist\DeathNote-$env:VERSION-portable.exe"
+          Get-ChildItem dist\*.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
       - uses: actions/upload-artifact@v4
         with:
-          name: death-note-windows
-          path: target/release/death-note.exe
-      - name: Publicar release (tags v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+          name: death-note-${{ env.VERSION }}
+          path: dist/*
+
+      - name: Extrair notas do CHANGELOG
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $lines = Get-Content CHANGELOG.md -Encoding utf8
+          $out = @(); $inside = $false
+          foreach ($l in $lines) {
+            if ($l -match '^## \[') {
+              if ($inside) { break }
+              if ($l -match "^## \[$([regex]::Escape($env:VERSION))\]") { $inside = $true; continue }
+            }
+            if ($inside) { $out += $l }
+          }
+          if ($out.Count -eq 0) { throw "CHANGELOG.md não tem a seção [$env:VERSION]" }
+          ($out -join "`n").Trim() | Set-Content -Encoding utf8 release-notes.md
+
+      - name: Publicar release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/death-note.exe
+          name: Death Note v${{ env.VERSION }}
+          body_path: release-notes.md
+          files: dist/*

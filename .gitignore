@@ -1,2 +1,4 @@
 /target
+/dist
 *.pdb
+release-notes.md

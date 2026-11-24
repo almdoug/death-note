@@ -8,6 +8,8 @@ use crate::doc::{
 use crate::editor::{self, RenderCtx, RichBuffer};
 use crate::fonts::{self, FontCaps};
 use crate::platform;
+use crate::{ipc, updater};
+use std::sync::mpsc::Receiver;
 use crate::storage::{self, InstanceLock, NoteData, NoteId, SessionData, WindowGeom};
 use crate::theme::{self, ACCENT_PRESETS, Colors, HIGHLIGHTS, Settings, TEXT_COLORS, ThemeMode};
 use eframe::egui::{
@@ -235,6 +237,10 @@ pub struct App {
     active: Option<NoteId>,
     applied_on_top: bool,
     _lock: Option<InstanceLock>,
+    inbox: Option<Receiver<ipc::Message>>,
+    update: updater::Shared,
+    update_open: bool,
+    last_update_check: f64,
 }
 
 fn translations() -> egui_dock::Translations {
@@ -276,6 +282,7 @@ impl App {
         session: Option<SessionData>,
         lock: Option<InstanceLock>,
         files: Vec<PathBuf>,
+        inbox: Option<Receiver<ipc::Message>>,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let caps = fonts::install(&ctx);
@@ -357,9 +364,17 @@ impl App {
             active: None,
             applied_on_top: false,
             _lock: lock,
+            inbox,
+            update: updater::new_shared(),
+            update_open: false,
+            last_update_check: 0.0,
         };
         app.active = app.focused_note();
         app.ui.focus_editor = app.active;
+        let _ = ipc::CTX.set(app.ctx.clone());
+        if app.settings.check_updates {
+            updater::check(&app.update, false);
+        }
         app
     }
 
@@ -963,6 +978,17 @@ impl App {
                     self.mark_dirty();
                 }
                 ui.add_space(10.0);
+                if let Some(label) = self.update_pill_label() {
+                    let pill = egui::Button::new(
+                        RichText::new(label).size(12.0).color(c.on_accent()),
+                    )
+                    .fill(c.accent)
+                    .corner_radius(CornerRadius::same(10));
+                    if ui.add(pill).on_hover_text("Ver atualização").clicked() {
+                        self.update_open = true;
+                    }
+                    ui.add_space(8.0);
+                }
                 let status = if let Some(e) = &self.save_error {
                     RichText::new(format!("⚠ {e}")).size(12.0).color(Color32::from_rgb(239, 68, 68))
                 } else if self.dirty_since.is_some() {
@@ -1032,6 +1058,10 @@ impl App {
                         }
                     }
                 });
+                if item(ui, "Verificar atualizações", "") {
+                    updater::check(&self.update, true);
+                    self.update_open = true;
+                }
                 if item(ui, "Configurações", "Ctrl+,") {
                     self.ui.settings_open = true;
                 }
@@ -1039,6 +1069,248 @@ impl App {
                     platform::open_folder(&storage::data_dir());
                 }
             });
+    }
+
+    /// Mensagens de outras instâncias e estado do atualizador.
+    fn poll_background(&mut self, now: f64) {
+        let mut focus = false;
+        if let Some(rx) = &self.inbox {
+            while let Ok(ipc::Message::Open(paths)) = rx.try_recv() {
+                focus = true;
+                for p in paths {
+                    self.actions.push(Action::OpenPath(p));
+                }
+            }
+        }
+        if focus {
+            self.ctx
+                .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
+        // Nova verificação a cada 12 h se o app ficar aberto.
+        if self.settings.check_updates {
+            if self.last_update_check == 0.0 {
+                self.last_update_check = now.max(0.001);
+            } else if now - self.last_update_check > 12.0 * 3600.0 {
+                self.last_update_check = now;
+                updater::check(&self.update, false);
+            }
+        }
+
+        let state = self.update.lock().unwrap().clone();
+        match state {
+            updater::State::UpToDate { manual: true } => {
+                *self.update.lock().unwrap() = updater::State::Idle;
+                if self.update_open {
+                    self.update_open = false;
+                    self.toast(format!(
+                        "Você já tem a versão mais recente (v{})",
+                        updater::current_version()
+                    ));
+                }
+            }
+            updater::State::Failed { manual: false, .. } => {
+                // Falha silenciosa na verificação automática (ex.: sem internet).
+                *self.update.lock().unwrap() = updater::State::Idle;
+            }
+            updater::State::Downloading { .. } => {
+                self.ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            _ => {}
+        }
+    }
+
+    fn update_pill_label(&self) -> Option<String> {
+        match &*self.update.lock().unwrap() {
+            updater::State::Available(r) => Some(format!("⬆ Atualização v{}", r.version)),
+            updater::State::Downloading { .. } => Some("⬇ Baixando atualização…".into()),
+            updater::State::Ready { .. } => Some("⬆ Pronto para atualizar".into()),
+            _ => None,
+        }
+    }
+
+    fn update_modal(&mut self, ctx: &egui::Context, c: &Colors) {
+        let state = self.update.lock().unwrap().clone();
+        let installed = updater::is_installed();
+        let mut close = false;
+        let mut retry = false;
+        let mut start_download: Option<updater::Release> = None;
+        let mut install: Option<PathBuf> = None;
+        let resp = egui::Modal::new(Id::new("dn-update")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Atualizações").size(19.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, "✕", "Fechar", c).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            let current = updater::current_version();
+            match &state {
+                updater::State::Idle
+                | updater::State::Checking { .. }
+                | updater::State::UpToDate { .. } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Procurando novas versões…");
+                    });
+                }
+                updater::State::Failed { message, .. } => {
+                    ui.label(
+                        RichText::new(format!("Não foi possível atualizar: {message}"))
+                            .color(Color32::from_rgb(239, 68, 68)),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Tentar de novo").clicked() {
+                            retry = true;
+                        }
+                        if ui.button("Abrir página de downloads").clicked() {
+                            platform::open_url(&format!(
+                                "https://github.com/{}/releases/latest",
+                                updater::REPO
+                            ));
+                        }
+                    });
+                }
+                updater::State::Available(r)
+                | updater::State::Downloading { release: r, .. }
+                | updater::State::Ready { release: r, .. } => {
+                    ui.label(
+                        RichText::new(format!("Nova versão disponível: v{}", r.version))
+                            .size(15.0)
+                            .strong()
+                            .color(c.accent),
+                    );
+                    ui.label(
+                        RichText::new(format!("Você está usando a v{current}"))
+                            .size(12.0)
+                            .color(c.dim),
+                    );
+                    ui.add_space(8.0);
+                    if !r.notes.trim().is_empty() {
+                        Frame::new()
+                            .fill(c.bg)
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(Margin::same(10))
+                            .show(ui, |ui| {
+                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    release_notes(ui, &r.notes);
+                                });
+                            });
+                        ui.add_space(10.0);
+                    }
+                    match &state {
+                        updater::State::Available(_) => {
+                            ui.horizontal(|ui| {
+                                let label = if installed {
+                                    "Atualizar agora"
+                                } else {
+                                    "Baixar instalador"
+                                };
+                                let b = egui::Button::new(
+                                    RichText::new(label).color(c.on_accent()),
+                                )
+                                .fill(c.accent);
+                                if ui.add(b).clicked() {
+                                    if installed {
+                                        start_download = Some(r.clone());
+                                    } else {
+                                        platform::open_url(&r.page);
+                                    }
+                                }
+                                if ui.button("Depois").clicked() {
+                                    close = true;
+                                }
+                                if ui.button("Ver no GitHub").clicked() {
+                                    platform::open_url(&r.page);
+                                }
+                            });
+                            if !installed {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Esta cópia é portátil: use o instalador para \
+                                         receber atualizações automáticas.",
+                                    )
+                                    .size(11.5)
+                                    .color(c.dim),
+                                );
+                            }
+                        }
+                        updater::State::Downloading { path, .. } => {
+                            let total = r.installer.as_ref().map(|a| a.size).unwrap_or(0);
+                            let got = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                            let frac = if total > 0 {
+                                (got as f32 / total as f32).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            ui.add(egui::ProgressBar::new(frac).text(format!(
+                                "Baixando… {:.1} de {:.1} MB",
+                                got as f64 / 1_048_576.0,
+                                total as f64 / 1_048_576.0
+                            )));
+                        }
+                        updater::State::Ready { installer, .. } => {
+                            ui.label("Download concluído e verificado.");
+                            ui.add_space(6.0);
+                            let b = egui::Button::new(
+                                RichText::new("Instalar e reiniciar").color(c.on_accent()),
+                            )
+                            .fill(c.accent);
+                            if ui.add(b).clicked() {
+                                install = Some(installer.clone());
+                            }
+                            ui.label(
+                                RichText::new(
+                                    "Suas notas são salvas antes; o Death Note reabre sozinho.",
+                                )
+                                .size(11.5)
+                                .color(c.dim),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+        if resp.should_close() {
+            close = true;
+        }
+        if retry {
+            *self.update.lock().unwrap() = updater::State::Idle;
+            updater::check(&self.update, true);
+        }
+        if let Some(r) = start_download {
+            updater::download(&self.update, r);
+        }
+        if let Some(path) = install {
+            self.save_now();
+            match updater::run_installer(&path) {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => {
+                    *self.update.lock().unwrap() = updater::State::Failed {
+                        message: e,
+                        manual: true,
+                    }
+                }
+            }
+        }
+        if close {
+            self.update_open = false;
+            let mut s = self.update.lock().unwrap();
+            if matches!(
+                *s,
+                updater::State::Failed { .. } | updater::State::UpToDate { .. }
+            ) {
+                *s = updater::State::Idle;
+            }
+        }
     }
 
     fn empty_state(&mut self, ui: &mut Ui, c: &Colors) {
@@ -1086,6 +1358,9 @@ impl App {
         }
         if self.ui.rename.is_some() {
             self.rename_modal(&ctx);
+        }
+        if self.update_open {
+            self.update_modal(&ctx, c);
         }
         if let Some((msg, until)) = self.ui.toast.clone() {
             let now = ctx.input(|i| i.time);
@@ -1365,6 +1640,22 @@ impl App {
                     }
                 });
 
+                section(ui, "Atualizações", c);
+                ui.checkbox(
+                    &mut self.settings.check_updates,
+                    "Procurar novas versões automaticamente ao abrir",
+                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Versão instalada: v{}", updater::current_version()))
+                            .color(c.dim),
+                    );
+                    if ui.button("Verificar agora").clicked() {
+                        updater::check(&self.update, true);
+                        self.update_open = true;
+                    }
+                });
+
                 section(ui, "Atalhos", c);
                 let shortcuts = [
                     ("Ctrl+T / Ctrl+N", "Nova nota"),
@@ -1395,7 +1686,7 @@ impl App {
                 });
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new(format!("Death Note v{}", env!("CARGO_PKG_VERSION")))
+                    RichText::new(format!("Death Note v{}", updater::current_version()))
                         .size(11.5)
                         .color(c.dim),
                 );
@@ -2373,6 +2664,22 @@ fn matches_query(title: &str, text: &str, q: &str) -> Option<String> {
 
 // ============================================================== utilidades
 
+/// Mostra as notas do release (Markdown simples do CHANGELOG).
+fn release_notes(ui: &mut Ui, notes: &str) {
+    let clean = |t: &str| t.replace("**", "").replace('`', "");
+    for line in notes.lines() {
+        let t = line.trim_end();
+        if let Some(h) = t.strip_prefix("### ").or_else(|| t.strip_prefix("## ")) {
+            ui.add_space(4.0);
+            ui.label(RichText::new(clean(h)).strong());
+        } else if let Some(item) = t.trim_start().strip_prefix("- ").or_else(|| t.trim_start().strip_prefix("* ")) {
+            ui.label(format!("•  {}", clean(item)));
+        } else if !t.trim().is_empty() {
+            ui.label(clean(t));
+        }
+    }
+}
+
 fn line_col(text: &str, char_idx: usize) -> (usize, usize) {
     let mut ln = 1;
     let mut col = 1;
@@ -2411,6 +2718,7 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         self.update_titlebar(frame);
         self.global_input();
+        self.poll_background(now);
         let c = self.colors();
 
         if self.settings.show_status_bar {

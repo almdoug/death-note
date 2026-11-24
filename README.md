@@ -16,6 +16,31 @@ Bloco de notas em abas, rápido e leve, escrito em Rust ([egui](https://github.c
 - Janela **sempre visível** (📌), tela cheia (`F11`), zoom do texto (`Ctrl` + roda).
 - Leve: ~90 MB de RAM e 0% de CPU parado (renderização só quando algo muda).
 
+## Instalação
+
+Baixe o `DeathNote-Setup-X.Y.Z.exe` na página de [releases](https://github.com/almdoug/death-note/releases/latest) e execute.
+Não precisa de administrador (instala em `%LOCALAPPDATA%\Programs\Death Note`). O instalador:
+
+- cria o atalho no **Menu Iniciar** (é só pesquisar "Death Note") e, se quiser, na área de trabalho;
+- adiciona **"Abrir com Death Note"** ao menu de contexto dos arquivos (no Windows 11 fica em "Mostrar mais opções");
+- faz os arquivos `.dnote` abrirem no Death Note e coloca o app em "Abrir com" para `.txt` e `.md`;
+- permite abrir pelo Executar (`Win+R` → `death-note`).
+
+Abrir um arquivo com o app já aberto leva o arquivo para a janela existente.
+Desinstalar pelo Windows não apaga suas notas (ficam em `%APPDATA%\DeathNote`).
+
+Também há uma versão portátil (`DeathNote-X.Y.Z-portable.exe`), que não se atualiza sozinha.
+
+## Atualizações
+
+O app verifica o último release do GitHub ao abrir (dá para desligar nas configurações).
+Quando há versão nova aparece um aviso na barra de status; o app baixa o instalador, confere o
+SHA-256, instala em silêncio e reabre com tudo como estava.
+
+Para publicar uma versão: suba a `version` no `Cargo.toml`, descreva as mudanças no `CHANGELOG.md`,
+faça o commit e envie uma tag `vX.Y.Z`. A CI gera o instalador e publica o release.
+Detalhes em [CLAUDE.md](CLAUDE.md).
+
 ## Atalhos
 
 | Atalho | Ação |
@@ -61,3 +86,6 @@ ou `~/.local/share/death-note` (Linux). A variável `DEATHNOTE_DATA_DIR` permite
 | `src/theme.rs` | Temas claro/escuro e cores |
 | `src/fonts.rs` | Fontes do sistema (negrito/itálico reais) |
 | `src/platform.rs` | Integrações do Windows (barra de título, foco da janela existente) |
+| `src/ipc.rs` | Repasse de arquivos para a instância já aberta |
+| `src/updater.rs` | Atualização automática pelo GitHub Releases |
+| `installer/death-note.iss` | Instalador (Inno Setup 6) |

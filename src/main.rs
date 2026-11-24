@@ -5,19 +5,37 @@ mod app;
 mod doc;
 mod editor;
 mod fonts;
+mod icon;
+mod ipc;
 mod platform;
 mod storage;
 mod theme;
+mod updater;
 
 use eframe::egui;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result<()> {
-    let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    // Caminhos absolutos: a outra instância pode ter outra pasta de trabalho.
+    let files: Vec<PathBuf> = std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|p| !p.to_string_lossy().starts_with("--"))
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(strip_verbatim)
+        .collect();
 
-    // Impede duas instâncias de sobrescreverem a mesma sessão.
+    // Instância única: se já houver uma aberta, repassa os arquivos para ela.
     let lock = storage::acquire_lock();
     if lock.is_none() {
+        // A instância principal pode estar iniciando (vários arquivos abertos de uma vez).
+        for _ in 0..50 {
+            if ipc::send(&files) {
+                platform::focus_existing_window(app::APP_TITLE);
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         if !platform::focus_existing_window(app::APP_TITLE) {
             rfd::MessageDialog::new()
                 .set_title(app::APP_TITLE)
@@ -26,6 +44,7 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    let inbox = ipc::serve();
 
     let session = storage::load_session();
 
@@ -54,44 +73,29 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         app::APP_TITLE,
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, session, lock, files)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, session, lock, files, inbox)))),
     )
 }
 
-/// Ícone gerado em código: um caderno escuro com marcador violeta.
-fn icon() -> egui::IconData {
-    let n = 64usize;
-    let mut rgba = vec![0u8; n * n * 4];
-    for y in 0..n {
-        for x in 0..n {
-            let i = (y * n + x) * 4;
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // cantos arredondados
-            let r = 12.0f32;
-            let cx = fx.clamp(4.0 + r, 60.0 - r);
-            let cy = fy.clamp(2.0 + r, 62.0 - r);
-            let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
-            if d > r || fx < 4.0 || fx > 60.0 || fy < 2.0 || fy > 62.0 {
-                continue;
-            }
-            let mut c = [28u8, 29, 33, 255];
-            if fx < 14.0 {
-                c = [124, 92, 255, 255]; // lombada
-            }
-            // linhas do caderno
-            if fx > 20.0 && fx < 52.0 && (fy as i32 - 20) >= 0 && (fy as i32 - 20) % 9 < 2 && fy < 52.0 {
-                c = [150, 152, 165, 255];
-            }
-            // marcador
-            if fx > 42.0 && fx < 50.0 && fy < 22.0 && !(fy > 16.0 && (fx - 46.0).abs() < (fy - 16.0)) {
-                c = [239, 68, 68, 255];
-            }
-            rgba[i..i + 4].copy_from_slice(&c);
-        }
+/// `canonicalize` no Windows devolve caminhos "verbatim" (`\\?\C:\...`); remove o prefixo.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    const VERBATIM_UNC: &str = "\\\\?\\UNC\\";
+    const VERBATIM: &str = "\\\\?\\";
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(VERBATIM_UNC) {
+        return PathBuf::from(format!("\\\\{rest}"));
     }
+    if let Some(rest) = s.strip_prefix(VERBATIM) {
+        return PathBuf::from(rest);
+    }
+    p
+}
+
+fn icon() -> egui::IconData {
+    let size = 64;
     egui::IconData {
-        rgba,
-        width: n as u32,
-        height: n as u32,
+        rgba: icon::rgba(size),
+        width: size,
+        height: size,
     }
 }
