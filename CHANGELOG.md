@@ -3,6 +3,18 @@
 Todas as mudanças visíveis para quem usa o Death Note. A seção de cada versão
 vira o texto do release no GitHub e aparece na janela de atualização do app.
 
+## [0.4.0] - 2026-11-23
+
+### Novidades
+- `Alt+Shift+R` mostra o arquivo da nota no Explorer (também no menu e no clique direito da aba).
+- O Executar agora abre o app com `Win+R` → `dn`.
+
+### Melhorias
+- A aba ativa tem curvas na base que se unem ao texto, como as abas do navegador.
+- Botão "+" com espaço depois das abas e realce arredondado.
+- "×" das abas redesenhado: aparece na aba ativa e ao passar o mouse, com realce arredondado.
+- Texto dos campos de busca (Ctrl+F e Ctrl+P) alinhado com o ícone.
+
 ## [0.3.0] - 2026-11-23
 
 ### Correções

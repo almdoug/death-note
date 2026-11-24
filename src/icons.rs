@@ -53,5 +53,6 @@ pub const SPLIT_V: &str = "\u{E874}";
 pub const MERGE: &str = "\u{E09A}";
 pub const HISTORY: &str = "\u{E1A0}";
 pub const FOLDER: &str = "\u{E24A}";
+pub const REVEAL: &str = "\u{E5DE}";
 pub const COPY: &str = "\u{E1CA}";
 pub const FILE_PLUS: &str = "\u{E236}";

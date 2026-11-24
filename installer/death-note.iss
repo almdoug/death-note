@@ -92,9 +92,11 @@ Root: HKA; Subkey: "Software\Classes\*\shell\DeathNote"; ValueType: string; Valu
 Root: HKA; Subkey: "Software\Classes\*\shell\DeathNote"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\DeathNote\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
 
-; Permite abrir pelo Executar (Win+R) digitando "dnote"
-Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dnote.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe}"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dnote.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"
+; Permite abrir pelo Executar (Win+R) digitando "dn"
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dn.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dn.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"
+; Remove o comando antigo "dnote" (v0.2.0 e v0.3.0)
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\dnote.exe"; ValueType: none; Flags: deletekey
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

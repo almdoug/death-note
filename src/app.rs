@@ -307,6 +307,7 @@ enum Action {
     Split(NoteId, Split),
     Unsplit,
     Focus(NoteId),
+    Reveal(NoteId),
 }
 
 // ===================================================================== App
@@ -620,6 +621,10 @@ impl App {
                     self.mark_dirty();
                 }
                 Action::Focus(id) => self.focus(id),
+                Action::Reveal(id) => match self.notes.get(&id).and_then(|n| n.file.clone()) {
+                    Some(path) => platform::reveal_in_explorer(&path),
+                    None => self.toast("Esta nota ainda não está salva em arquivo. Use Ctrl+S."),
+                },
             }
         }
     }
@@ -855,6 +860,11 @@ impl App {
                 self.actions.push(Action::Save(id));
             }
         }
+        if take_key(&ctx, Modifiers::ALT | Modifiers::SHIFT, Key::R) {
+            if let Some(id) = active {
+                self.actions.push(Action::Reveal(id));
+            }
+        }
         if take_key(&ctx, cmd, Key::O) {
             self.actions.push(Action::Open);
         }
@@ -939,6 +949,35 @@ impl App {
 
     // ------------------------------------------------------- interface
 
+    /// Botão "+" de cada painel: logo depois da última aba, com respiro e
+    /// hover arredondado (o da biblioteca fica colado e tem hover quadrado).
+    fn add_tab_buttons(&mut self, ui: &mut Ui, tab_rects: &HashMap<NoteId, Rect>, c: &Colors) {
+        let mut buttons = Vec::new();
+        for (path, leaf) in self.dock.iter_leaves() {
+            let rects: Vec<Rect> = leaf.tabs().iter().filter_map(|t| tab_rects.get(t)).copied().collect();
+            let Some(first) = rects.first() else { continue };
+            let right = rects.iter().fold(first.right(), |m, r| m.max(r.right()));
+            let x = (right + 6.0).min(leaf.rect().right() - 34.0);
+            let rect = Rect::from_min_size(pos2(x, first.center().y - 13.0), vec2(26.0, 26.0));
+            buttons.push((path, rect));
+        }
+        for (path, rect) in buttons {
+            let resp = ui
+                .interact(rect, Id::new(("dn-add-tab", format!("{path:?}"))), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Nova nota (Ctrl+T)");
+            let p = ui.painter();
+            if resp.hovered() {
+                p.rect_filled(rect, 7.0, theme::mix(c.panel, c.text, 0.09));
+            }
+            let col = if resp.hovered() { c.text } else { c.dim };
+            p.text(rect.center(), Align2::CENTER_CENTER, icons::PLUS, icons::font(15.0), col);
+            if resp.clicked() {
+                self.actions.push(Action::NewIn(path));
+            }
+        }
+    }
+
     /// "Nome da nota — Death Note" na barra de título, barra de tarefas e Alt+Tab.
     fn update_window_title(&mut self) {
         let title = match self.active.and_then(|id| self.notes.get(&id)) {
@@ -984,15 +1023,15 @@ impl App {
         // Sem barra de rolagem horizontal por cima do editor quando há muitas abas.
         s.tab_bar.show_scroll_bar_on_overflow = false;
         s.tab_bar.inner_margin = Margin {
-            left: 6,
-            right: 6,
+            left: 8,
+            right: 8,
             top: 4,
             bottom: 0,
         };
 
         let top = CornerRadius {
-            nw: 9,
-            ne: 9,
+            nw: TAB_RADIUS as u8,
+            ne: TAB_RADIUS as u8,
             sw: 0,
             se: 0,
         };
@@ -1032,9 +1071,11 @@ impl App {
         s.separator.color_hovered = c.accent;
         s.separator.color_dragged = c.accent;
 
-        s.buttons.close_tab_color = c.dim;
-        s.buttons.close_tab_active_color = c.text;
-        s.buttons.close_tab_bg_fill = theme::mix(c.bg, c.text, 0.1);
+        // O "×" é desenhado em `on_tab_button` (ícone de verdade, hover arredondado);
+        // o da biblioteca fica invisível, mas a área de clique dele continua valendo.
+        s.buttons.close_tab_color = Color32::TRANSPARENT;
+        s.buttons.close_tab_active_color = Color32::TRANSPARENT;
+        s.buttons.close_tab_bg_fill = Color32::TRANSPARENT;
         s.buttons.add_tab_color = c.dim;
         s.buttons.add_tab_active_color = c.text;
         s.buttons.add_tab_bg_fill = theme::mix(c.panel, c.text, 0.08);
@@ -1201,6 +1242,12 @@ impl App {
                 }
                 if menu_item(ui, c, icons::PENCIL, "Renomear nota", "Clique duplo na aba", has) {
                     self.actions.push(Action::Rename(active.unwrap()));
+                }
+                let has_file = active
+                    .and_then(|id| self.notes.get(&id))
+                    .is_some_and(|n| n.file.is_some());
+                if menu_item(ui, c, icons::REVEAL, "Mostrar no Explorer", "Alt+Shift+R", has_file) {
+                    self.actions.push(Action::Reveal(active.unwrap()));
                 }
                 ui.separator();
                 if menu_item(ui, c, icons::SEARCH, "Busca rápida", "Ctrl+P", true) {
@@ -1693,6 +1740,8 @@ impl App {
                         .desired_width(f32::INFINITY)
                         .font(FontId::proportional(16.0))
                         .frame(Frame::NONE)
+                        .min_size(vec2(0.0, 28.0))
+                        .vertical_align(Align::Center)
                         .hint_text("Buscar em todas as notas…"),
                 );
                 if sw.focus {
@@ -1923,6 +1972,7 @@ impl App {
                         ("Ctrl+Shift+T", "Reabrir nota fechada"),
                         ("Ctrl+Tab / Ctrl+Shift+Tab", "Próxima / anterior aba"),
                         ("Ctrl+O", "Abrir arquivo"),
+                        ("Alt+Shift+R", "Mostrar o arquivo da nota no Explorer"),
                         ("Ctrl+S / Ctrl+Shift+S", "Salvar / Salvar como"),
                         ("Ctrl+F", "Buscar na nota"),
                         ("Ctrl+P / Ctrl+K", "Busca rápida entre notas"),
@@ -2014,6 +2064,10 @@ struct Viewer<'a> {
     active: &'a mut Option<NoteId>,
     split: bool,
     now: f64,
+    /// Abas ativas (uma por painel) e a cor de fundo de cada uma.
+    tab_bg: &'a HashMap<NoteId, Color32>,
+    /// Retângulo de cada aba neste frame (para posicionar o "+").
+    tab_rects: &'a mut HashMap<NoteId, Rect>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -2034,6 +2088,36 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn on_tab_button(&mut self, tab: &mut NoteId, response: &egui::Response) {
+        let r = response.rect;
+        self.tab_rects.insert(*tab, r);
+        let painter = response.ctx.layer_painter(response.layer_id);
+        let c = self.colors;
+        let pointer = response.ctx.pointer_hover_pos();
+        let active_bg = self.tab_bg.get(tab).copied();
+
+        // Curvas na base da aba ativa: ela "escorre" para dentro do editor,
+        // como as abas do navegador.
+        if let Some(bg) = active_bg {
+            let clip = r.expand2(vec2(TAB_RADIUS + 1.0, 0.0));
+            let fp = painter.with_clip_rect(clip);
+            tab_flare(&fp, pos2(r.left(), r.bottom()), -1.0, bg);
+            tab_flare(&fp, pos2(r.right(), r.bottom()), 1.0, bg);
+        }
+
+        // "×": visível na aba ativa e ao passar o mouse sobre a aba.
+        let close = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(20.0, 20.0));
+        let over_tab = pointer.is_some_and(|p| r.contains(p));
+        let over_close = pointer.is_some_and(|p| close.contains(p));
+        if active_bg.is_some() || over_tab {
+            let cp = painter.with_clip_rect(r);
+            let base = active_bg.unwrap_or_else(|| theme::mix(c.panel, c.text, 0.06));
+            if over_close {
+                cp.rect_filled(close, 6.0, theme::mix(base, c.text, 0.12));
+            }
+            let col = if over_close { c.text } else { c.dim };
+            cp.text(close.center(), Align2::CENTER_CENTER, icons::X, icons::font(13.0), col);
+        }
+
         // Com a tela dividida, uma linha na cor de destaque marca o painel em foco.
         if self.split && *self.active == Some(*tab) {
             let r = response.rect;
@@ -2093,6 +2177,11 @@ impl TabViewer for Viewer<'_> {
         }
         if menu_item(ui, &c, icons::FLOPPY, "Salvar como…", "Ctrl+Shift+S", true) {
             self.actions.push(Action::SaveAs(id));
+            ui.close();
+        }
+        let has_file = self.notes.get(&id).is_some_and(|n| n.file.is_some());
+        if menu_item(ui, &c, icons::REVEAL, "Mostrar no Explorer", "Alt+Shift+R", has_file) {
+            self.actions.push(Action::Reveal(id));
             ui.close();
         }
         if menu_item(ui, &c, icons::MARKDOWN, "Copiar como Markdown", "", true) {
@@ -2787,6 +2876,33 @@ fn tool(
     resp.on_hover_text(tip)
 }
 
+const TAB_RADIUS: f32 = 8.0;
+
+/// Curva côncava na base da aba (`dir` = -1 esquerda, +1 direita).
+/// `corner` é o canto inferior da aba.
+fn tab_flare(p: &egui::Painter, corner: Pos2, dir: f32, col: Color32) {
+    let r = TAB_RADIUS;
+    let center = pos2(corner.x + dir * r, corner.y - r);
+    let n = 12;
+    let arc: Vec<Pos2> = (0..=n)
+        .map(|i| {
+            let a = i as f32 / n as f32 * std::f32::consts::FRAC_PI_2;
+            pos2(center.x - dir * r * a.cos(), center.y + r * a.sin())
+        })
+        .collect();
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(corner, col);
+    for q in &arc {
+        mesh.colored_vertex(*q, col);
+    }
+    for i in 1..=n as u32 {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    p.add(mesh);
+    // Borda suavizada (o mesh não tem antisserrilhado).
+    p.add(egui::Shape::line(arc, Stroke::new(1.0, col)));
+}
+
 fn tool_icon(ui: &mut Ui, c: &Colors, active: bool, glyph: &str, tip: &str) -> egui::Response {
     tool(ui, c, active, tip, |p, rect, col| {
         p.text(rect.center(), Align2::CENTER_CENTER, glyph, icons::font(18.0), col);
@@ -2974,6 +3090,8 @@ fn find_bar(ui: &mut Ui, f: &mut FindState, note_id: NoteId, c: &Colors) -> bool
                         .id(Id::new(("dn-find", note_id)))
                         .desired_width(200.0)
                         .frame(Frame::NONE)
+                        .min_size(vec2(0.0, 24.0))
+                        .vertical_align(Align::Center)
                         .hint_text("Buscar nesta nota"),
                 );
                 if f.focus {
@@ -3168,6 +3286,17 @@ impl eframe::App for App {
                 let style = self.dock_style(&c);
                 let mut changed = false;
                 let split = self.dock.iter_leaves().count() > 1;
+                // Cor de fundo da aba ativa de cada painel (a do painel em foco é a do editor).
+                let focused_leaf = self.dock.focused_leaf();
+                let unfocused_bg = theme::mix(c.bg, c.panel, 0.45);
+                let mut tab_bg = HashMap::new();
+                for (path, leaf) in self.dock.iter_leaves() {
+                    if let Some(t) = leaf.tabs().get(leaf.active.0) {
+                        let bg = if Some(path) == focused_leaf || !split { c.bg } else { unfocused_bg };
+                        tab_bg.insert(*t, bg);
+                    }
+                }
+                let mut tab_rects = HashMap::new();
                 let mut viewer = Viewer {
                     notes: &mut self.notes,
                     settings: &self.settings,
@@ -3179,11 +3308,13 @@ impl eframe::App for App {
                     active: &mut self.active,
                     split,
                     now,
+                    tab_bg: &tab_bg,
+                    tab_rects: &mut tab_rects,
                 };
                 DockArea::new(&mut self.dock)
                     .id(Id::new("dn-dock"))
                     .style(style)
-                    .show_add_buttons(true)
+                    .show_add_buttons(false)
                     .show_close_buttons(true)
                     .show_leaf_close_all_buttons(false)
                     .show_leaf_collapse_buttons(false)
@@ -3198,6 +3329,7 @@ impl eframe::App for App {
                 if let Some(id) = self.dock.find_active_focused().map(|(_, t)| *t) {
                     self.active = Some(id);
                 }
+                self.add_tab_buttons(ui, &tab_rects, &c);
             });
 
         self.overlays(&c);

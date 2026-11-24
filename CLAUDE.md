@@ -78,7 +78,7 @@ $env:DEATHNOTE_DATA_DIR = "<pasta temporária>"; .\target\debug\death-note.exe
 - `AppId` em `installer/death-note.iss` — mudar faz o Windows instalar uma cópia nova
   em vez de atualizar.
 - Nomes dos arquivos do release: `DeathNote-Setup-*.exe` e `SHA256SUMS.txt`.
-- Comando `dnote` do Executar (`App Paths\dnote.exe` no instalador).
+- Comando `dn` do Executar (`App Paths\dn.exe` no instalador).
 - Parâmetro `/RELAUNCH=1` do instalador e o repositório `almdoug/death-note`
   (`src/updater.rs`).
 - Formato da sessão (`session.json`) e do `.dnote`: só adicione campos com

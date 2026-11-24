@@ -116,6 +116,25 @@ pub fn open_folder(path: &std::path::Path) {
     let _ = std::process::Command::new(cmd).arg(path).spawn();
 }
 
+/// Abre o gerenciador de arquivos com o arquivo já selecionado.
+pub fn reveal_in_explorer(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `/select,"caminho"` precisa das aspas exatamente assim; `raw_arg`
+        // evita que o Rust reescape o argumento.
+        let _ = std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(dir) = path.parent() {
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
+}
+
 /// Abre um endereço no navegador padrão.
 pub fn open_url(url: &str) {
     #[cfg(windows)]
