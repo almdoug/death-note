@@ -3,6 +3,17 @@
 Todas as mudanças visíveis para quem usa o Death Note. A seção de cada versão
 vira o texto do release no GitHub e aparece na janela de atualização do app.
 
+## [0.5.0] - 2026-11-25
+
+### Novidades
+- Tela dividida numa aba só: as notas lado a lado ficam juntas em uma única aba, e dá para ir e voltar entre ela e as outras abas sem perder a divisão.
+- "Desfazer divisão" (clique direito na aba ou menu) devolve cada nota para a sua própria aba.
+- Cada painel da divisão tem um cabeçalho com o nome da nota, botão de fechar e o menu da nota, incluindo "Mover para aba própria".
+
+### Melhorias
+- Arrastar uma aba para a lateral de uma divisão acrescenta a nota a ela.
+- Clique duplo no divisor volta os painéis para o meio.
+
 ## [0.4.0] - 2026-11-23
 
 ### Novidades

@@ -2,6 +2,7 @@
 //! configurações e arquivos `.dnote` / `.md` / `.txt`.
 
 use crate::doc::{Doc, DocData};
+use crate::panes::SavedTabs;
 use crate::theme::Settings;
 use egui_dock::DockState;
 use serde::{Deserialize, Serialize};
@@ -36,8 +37,13 @@ pub struct SessionData {
     pub version: u32,
     pub next_id: NoteId,
     pub notes: Vec<NoteData>,
+    /// Layout das versões até 0.4 (com divisões do egui_dock). Continua sendo
+    /// gravado, sem divisões, para que versões antigas abram a sessão.
     #[serde(default)]
     pub dock: Option<DockState<NoteId>>,
+    /// Abas, com os grupos em tela dividida (0.5+).
+    #[serde(default)]
+    pub tabs: Option<SavedTabs>,
     #[serde(default)]
     pub closed: Vec<NoteData>,
     #[serde(default)]

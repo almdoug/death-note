@@ -5,7 +5,7 @@ Bloco de notas em abas, rápido e leve, escrito em Rust ([egui](https://github.c
 ## Recursos
 
 - **Abas** com títulos automáticos (primeira linha) ou renomeáveis (duplo clique).
-- **Tela dividida**: arraste uma aba para a metade de um painel para dividir; arraste de volta para juntar. Também pelo clique direito na aba ou pelo menu ☰ (“Desfazer divisões”).
+- **Tela dividida**: arraste uma aba para a metade da área de texto para dividir. As notas divididas ficam juntas numa aba só, e dá para ir e voltar entre ela e as outras abas. Para desfazer, clique direito na aba (“Desfazer divisão”) ou use o menu ☰; cada nota volta a ter a sua aba.
 - **Barra de formatação flutuante** que aparece sobre o texto selecionado: negrito, itálico, sublinhado, tachado, código, títulos H1–H3, cor do texto, marca-texto, checklist, lista, copiar como Markdown e limpar formatação.
 - **Checklists clicáveis** (☐/☑) e continuação automática de listas ao pressionar Enter.
 - **Nunca perde nada**: a sessão é gravada continuamente com escrita atômica (arquivo temporário + `fsync` + renomeação) e um backup do último estado bom. Se o PC desligar de repente, tudo estará lá ao reabrir.

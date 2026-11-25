@@ -18,12 +18,10 @@ use eframe::egui::{
     Margin, Modifiers, Order, Pos2, Rect, RichText, Sense, Stroke, TextBuffer, Theme, Ui, Vec2,
     WidgetText, pos2, vec2,
 };
-use egui_dock::{
-    AllowedSplits, DockArea, DockState, Node, NodePath, Split, TabDestination,
-    TabInsert, TabViewer,
-};
+use crate::panes::{self, Group, GroupId, Pane, SavedTab, SavedTabs, Slot, Tab};
+use egui_dock::{AllowedSplits, DockArea, DockState, NodeIndex, NodePath, Split, TabIndex, TabViewer};
 use egui_dock::tab_viewer::OnCloseResponse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -175,9 +173,12 @@ fn untitled_label(created: i64) -> String {
 
 /// Corta títulos longos para as abas não ocuparem a barra inteira.
 fn short_title(t: &str) -> String {
-    const MAX: usize = 28;
-    if t.chars().count() > MAX {
-        let mut s: String = t.chars().take(MAX - 1).collect();
+    clip_title(t, 28)
+}
+
+fn clip_title(t: &str, max: usize) -> String {
+    if t.chars().count() > max {
+        let mut s: String = t.chars().take(max.saturating_sub(1)).collect();
         s = s.trim_end().to_string();
         s.push('…');
         s
@@ -294,9 +295,10 @@ impl UiState {
 
 enum Action {
     New,
-    NewIn(NodePath),
     Close(NoteId),
     Closed(NoteId),
+    /// Fecha todas as notas de um grupo (a aba dele foi fechada).
+    CloseGroup(GroupId),
     Reopen(usize),
     Open,
     OpenPath(PathBuf),
@@ -305,7 +307,10 @@ enum Action {
     Rename(NoteId),
     Duplicate(NoteId),
     Split(NoteId, Split),
-    Unsplit,
+    /// Desfaz a divisão do grupo da nota: cada nota volta a ter a sua aba.
+    Unsplit(NoteId),
+    /// Tira a nota do grupo e a põe numa aba própria, logo depois dele.
+    PopOut(NoteId),
     Focus(NoteId),
     Reveal(NoteId),
 }
@@ -315,7 +320,10 @@ enum Action {
 pub struct App {
     ctx: egui::Context,
     notes: HashMap<NoteId, Note>,
-    dock: DockState<NoteId>,
+    /// Barra de abas (uma faixa só; divisões viram grupos).
+    dock: DockState<Tab>,
+    groups: HashMap<GroupId, Group>,
+    next_group: GroupId,
     closed: Vec<NoteData>,
     next_id: NoteId,
     settings: Settings,
@@ -356,7 +364,7 @@ Um bloco de notas **rápido**, *leve* e que nunca perde nada.
 
 ## O básico
 - Selecione um texto para ver a **barra de formatação** flutuante.
-- Arraste uma aba para a lateral para **dividir a tela**. Arraste de volta para desfazer.
+- Arraste uma aba para a lateral para **dividir a tela**: as notas divididas ficam juntas numa aba só. Clique com o botão direito nela para desfazer.
 - Tudo é salvo automaticamente, até se o PC desligar de repente.
 - Abas fechadas vão para *Fechadas recentemente* (`Ctrl+Shift+T` reabre).
 
@@ -389,6 +397,7 @@ impl App {
         let mut next_id = 1;
         let mut closed = Vec::new();
         let mut dock = None;
+        let mut saved_tabs = None;
 
         if let Some(s) = session {
             next_id = s.next_id.max(1);
@@ -401,9 +410,10 @@ impl App {
                 next_id = next_id.max(c.id + 1);
             }
             dock = s.dock;
+            saved_tabs = s.tabs;
         }
 
-        if notes.is_empty() && dock.is_none() {
+        if notes.is_empty() && dock.is_none() && saved_tabs.is_none() {
             let mut d = Doc::from_markdown(WELCOME);
             if let Some(b) = d.text.find("nunca perde nada") {
                 let s = d.text[..b].chars().count();
@@ -415,37 +425,78 @@ impl App {
             next_id += 1;
         }
 
-        // Valida o layout salvo contra as notas existentes.
-        // Um layout salvo sem nenhuma aba (todas fechadas) volta sem a árvore
-        // da superfície principal, e o egui_dock entra em pânico ao usá-lo.
-        // Nesse caso, ou se o layout estiver inválido, começa um layout novo.
-        let mut dock = dock
-            .filter(|d| {
-                d.get_surface(egui_dock::SurfaceIndex::main()).is_some()
-                    && d.iter_all_tabs().next().is_some()
-            })
-            .unwrap_or_else(|| DockState::new(vec![]));
-        dock.retain_tabs(|id| notes.contains_key(id));
-        if dock.iter_all_tabs().next().is_none() {
-            dock = DockState::new(vec![]);
+        // Restaura as abas (e os grupos em tela dividida), conferindo com as
+        // notas existentes. Sessões até a 0.4 só têm o layout do egui_dock,
+        // com as divisões dele; elas viram um grupo.
+        let mut groups = HashMap::new();
+        let mut next_group: GroupId = 1;
+        let mut placed: HashSet<NoteId> = HashSet::new();
+        let mut tabs: Vec<Tab> = Vec::new();
+        let mut active_tab = 0;
+        if let Some(st) = saved_tabs {
+            for (i, t) in st.tabs.into_iter().enumerate() {
+                if i == st.active {
+                    active_tab = tabs.len();
+                }
+                let root = match t {
+                    SavedTab::Note(id) => Some((Pane::Note(id), id)),
+                    SavedTab::Group(g) => g
+                        .root
+                        .retain(&|id| notes.contains_key(&id) && !placed.contains(&id))
+                        .map(|r| (r, g.focus)),
+                };
+                match root {
+                    Some((Pane::Note(id), _)) => {
+                        if notes.contains_key(&id) && placed.insert(id) {
+                            tabs.push(Tab::Note(id));
+                        }
+                    }
+                    Some((root, focus)) => {
+                        placed.extend(root.notes());
+                        groups.insert(next_group, Group::new(root, focus));
+                        tabs.push(Tab::Group(next_group));
+                        next_group += 1;
+                    }
+                    None => {}
+                }
+            }
+        } else if let Some(mut d) = dock.filter(|d| {
+            // Um layout salvo sem nenhuma aba (todas fechadas) volta sem a árvore
+            // da superfície principal, e o egui_dock entra em pânico ao usá-lo.
+            d.get_surface(egui_dock::SurfaceIndex::main()).is_some()
+                && d.iter_all_tabs().next().is_some()
+        }) {
+            d.retain_tabs(|id| notes.contains_key(id));
+            if d.iter_all_tabs().next().is_some() {
+                let d = d.map_tabs(|id| Tab::Note(*id));
+                let (t, a) = tabs_from_dock(d.main_surface(), &mut groups, &mut next_group, None);
+                for t in &t {
+                    match t {
+                        Tab::Note(id) => {
+                            placed.insert(*id);
+                        }
+                        Tab::Group(g) => placed.extend(groups[g].root.notes()),
+                    }
+                }
+                tabs = t;
+                active_tab = a;
+            }
         }
-        let mut in_dock: Vec<NoteId> = dock.iter_all_tabs().map(|(_, id)| *id).collect();
-        in_dock.sort();
         let mut missing: Vec<NoteId> = notes
             .keys()
-            .filter(|id| in_dock.binary_search(id).is_err())
+            .filter(|id| !placed.contains(id))
             .copied()
             .collect();
         missing.sort();
-        for id in missing {
-            dock.main_surface_mut().push_to_focused_leaf(id);
-        }
-        dock.translations = translations();
+        tabs.extend(missing.into_iter().map(Tab::Note));
+        let dock = new_dock(tabs, active_tab);
 
         let mut app = Self {
             ctx,
             notes,
             dock,
+            groups,
+            next_group,
             closed,
             next_id,
             settings,
@@ -503,13 +554,46 @@ impl App {
         self.ui.toast(&ctx, msg);
     }
 
+    /// Aba selecionada na barra.
+    fn current_tab(&self) -> Option<Tab> {
+        let (_, leaf) = self.dock.iter_leaves().next()?;
+        leaf.tabs().get(leaf.active.0).or(leaf.tabs().first()).copied()
+    }
+
+    /// Nota que uma aba mostra em foco.
+    fn tab_note(&self, tab: Tab) -> Option<NoteId> {
+        match tab {
+            Tab::Note(id) => Some(id),
+            Tab::Group(g) => self.groups.get(&g).map(|g| g.focus),
+        }
+    }
+
     fn focused_note(&mut self) -> Option<NoteId> {
-        self.dock.find_active_focused().map(|(_, id)| *id).or_else(|| {
-            self.dock
-                .iter_all_tabs()
-                .map(|(_, id)| *id)
-                .next()
-        })
+        self.current_tab().and_then(|t| self.tab_note(t))
+    }
+
+    /// Grupo em tela dividida que contém a nota, se houver.
+    fn group_of(&self, id: NoteId) -> Option<GroupId> {
+        self.groups
+            .iter()
+            .find(|(_, g)| g.root.contains(id))
+            .map(|(gid, _)| *gid)
+    }
+
+    /// Notas abertas, na ordem das abas (as de um grupo na ordem dos painéis).
+    fn open_notes(&self) -> Vec<NoteId> {
+        let mut out = Vec::new();
+        for (_, t) in self.dock.iter_all_tabs() {
+            match t {
+                Tab::Note(id) => out.push(*id),
+                Tab::Group(g) => {
+                    if let Some(g) = self.groups.get(g) {
+                        out.extend(g.root.notes());
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn alloc_id(&mut self) -> NoteId {
@@ -518,29 +602,95 @@ impl App {
         id
     }
 
-    fn add_note(&mut self, note: Note, at: Option<NodePath>) -> NoteId {
+    fn alloc_group(&mut self) -> GroupId {
+        let g = self.next_group;
+        self.next_group += 1;
+        g
+    }
+
+    fn add_note(&mut self, note: Note) -> NoteId {
         let id = note.id;
         self.notes.insert(id, note);
-        match at {
-            Some(path) if self.dock.leaf(path).is_ok() => {
-                if let Ok(leaf) = self.dock.leaf_mut(path) {
-                    leaf.append_tab(id);
-                }
-            }
-            _ => self.dock.main_surface_mut().push_to_focused_leaf(id),
-        }
+        self.dock.main_surface_mut().push_to_focused_leaf(Tab::Note(id));
         self.focus(id);
         self.mark_dirty();
         id
     }
 
-    fn focus(&mut self, id: NoteId) {
-        if let Some(path) = self.dock.find_tab(&id) {
+    fn select_tab(&mut self, tab: Tab) {
+        if let Some(path) = self.dock.find_tab(&tab) {
             let _ = self.dock.set_active_tab(path);
             self.dock.set_focused_node_and_surface(path.node_path());
         }
+    }
+
+    fn focus(&mut self, id: NoteId) {
+        match self.group_of(id) {
+            Some(g) => {
+                if let Some(group) = self.groups.get_mut(&g) {
+                    group.focus = id;
+                }
+                self.select_tab(Tab::Group(g));
+            }
+            None => self.select_tab(Tab::Note(id)),
+        }
         self.active = Some(id);
         self.ui.focus_editor = Some(id);
+    }
+
+    /// Troca uma aba da barra por outras, no mesmo lugar.
+    fn replace_tab(&mut self, old: Tab, new: Vec<Tab>) {
+        let Some(path) = self.dock.find_tab(&old) else {
+            return;
+        };
+        if let Ok(leaf) = self.dock.leaf_mut(path.node_path()) {
+            let at = path.tab.0;
+            leaf.remove_tab(at);
+            for (i, t) in new.into_iter().enumerate() {
+                leaf.insert_tab(at + i, t);
+            }
+            let _ = leaf.set_active_tab(at.min(leaf.len().saturating_sub(1)));
+        }
+    }
+
+    /// Tira a nota da barra ou do grupo onde ela está. Um grupo que fica com
+    /// uma nota só volta a ser uma aba comum.
+    fn detach(&mut self, id: NoteId) {
+        if let Some(g) = self.group_of(id) {
+            let group = self.groups.remove(&g).unwrap();
+            match group.root.remove(id) {
+                Some(Pane::Note(rest)) => self.replace_tab(Tab::Group(g), vec![Tab::Note(rest)]),
+                Some(root) => {
+                    self.groups.insert(g, Group::new(root, group.focus));
+                }
+                None => self.replace_tab(Tab::Group(g), vec![]),
+            }
+        } else if let Some(path) = self.dock.find_tab(&Tab::Note(id)) {
+            self.dock.remove_tab(path);
+        }
+    }
+
+    /// Dobra num grupo a divisão que o egui_dock fez quando uma aba foi
+    /// arrastada para a lateral.
+    fn fold_splits(&mut self) {
+        // A aba recém-solta é a ativa do painel em foco: ela fica com o foco.
+        let dropped = self
+            .dock
+            .find_active_focused()
+            .map(|(_, t)| *t)
+            .and_then(|t| self.tab_note(t))
+            .or(self.active);
+        let (tabs, active) = tabs_from_dock(
+            self.dock.main_surface(),
+            &mut self.groups,
+            &mut self.next_group,
+            dropped,
+        );
+        self.dock = new_dock(tabs, active);
+        if let Some(id) = self.focused_note() {
+            self.focus(id);
+        }
+        self.mark_dirty();
     }
 
     // ------------------------------------------------------------ ações
@@ -551,19 +701,23 @@ impl App {
             match a {
                 Action::New => {
                     let id = self.alloc_id();
-                    self.add_note(Note::new(id, Doc::default()), None);
-                }
-                Action::NewIn(path) => {
-                    let id = self.alloc_id();
-                    self.add_note(Note::new(id, Doc::default()), Some(path));
+                    self.add_note(Note::new(id, Doc::default()));
                 }
                 Action::Close(id) => {
-                    if let Some(path) = self.dock.find_tab(&id) {
-                        self.dock.remove_tab(path);
-                    }
+                    self.detach(id);
                     self.after_close(id);
                 }
                 Action::Closed(id) => self.after_close(id),
+                Action::CloseGroup(g) => {
+                    if let Some(group) = self.groups.remove(&g) {
+                        if let Some(path) = self.dock.find_tab(&Tab::Group(g)) {
+                            self.dock.remove_tab(path);
+                        }
+                        for id in group.root.notes() {
+                            self.after_close(id);
+                        }
+                    }
+                }
                 Action::Reopen(i) => {
                     if i < self.closed.len() {
                         let d = self.closed.remove(i);
@@ -572,7 +726,7 @@ impl App {
                             n.id = self.alloc_id();
                         }
                         let title = n.title.clone();
-                        self.add_note(n, None);
+                        self.add_note(n);
                         self.toast(format!("Reaberta: {}", short_title(&title)));
                     }
                 }
@@ -604,22 +758,12 @@ impl App {
                         let mut note = Note::new(new_id, doc);
                         note.title = title;
                         note.custom_title = true;
-                        let at = self.dock.find_tab(&id).map(|p| p.node_path());
-                        self.add_note(note, at);
+                        self.add_note(note);
                     }
                 }
                 Action::Split(id, split) => self.split(id, split),
-                Action::Unsplit => {
-                    let tabs: Vec<NoteId> = self.dock.iter_all_tabs().map(|(_, t)| *t).collect();
-                    let active = self.active;
-                    let mut d = DockState::new(tabs);
-                    d.translations = translations();
-                    self.dock = d;
-                    if let Some(a) = active {
-                        self.focus(a);
-                    }
-                    self.mark_dirty();
-                }
+                Action::Unsplit(id) => self.unsplit(id),
+                Action::PopOut(id) => self.pop_out(id),
                 Action::Focus(id) => self.focus(id),
                 Action::Reveal(id) => match self.notes.get(&id).and_then(|n| n.file.clone()) {
                     Some(path) => platform::reveal_in_explorer(&path),
@@ -647,29 +791,77 @@ impl App {
         self.mark_dirty();
     }
 
+    /// Divide a tela ao lado da nota, com uma nota nova. A nota e a nova
+    /// passam a dividir a mesma aba.
     fn split(&mut self, id: NoteId, split: Split) {
-        let Some(path) = self.dock.find_tab(&id) else {
+        if !self.notes.contains_key(&id) {
+            return;
+        }
+        let new_id = self.alloc_id();
+        self.notes.insert(new_id, Note::new(new_id, Doc::default()));
+        let side_by_side = split.is_left_right();
+        match self.group_of(id) {
+            Some(g) => {
+                if let Some(group) = self.groups.get_mut(&g) {
+                    group.root.split_at(id, new_id, side_by_side);
+                }
+            }
+            None => {
+                let g = self.alloc_group();
+                let root = Pane::split(side_by_side, Pane::Note(id), Pane::Note(new_id));
+                self.groups.insert(g, Group::new(root, new_id));
+                self.replace_tab(Tab::Note(id), vec![Tab::Group(g)]);
+            }
+        }
+        self.focus(new_id);
+        self.mark_dirty();
+    }
+
+    /// Desfaz a divisão: cada nota do grupo volta a ter a sua aba, no lugar
+    /// onde estava o grupo.
+    fn unsplit(&mut self, id: NoteId) {
+        let Some(g) = self.group_of(id) else {
             return;
         };
-        let count = self
-            .dock
-            .leaf(path.node_path())
-            .map(|l| l.len())
-            .unwrap_or(0);
-        if count > 1 {
-            self.dock.move_tab(
-                path,
-                TabDestination::Node(path.node_path(), TabInsert::Split(split)),
-            );
-            self.focus(id);
-        } else {
-            let new_id = self.alloc_id();
-            self.notes.insert(new_id, Note::new(new_id, Doc::default()));
-            self.dock
-                .split(path.node_path(), split, 0.5, Node::leaf(new_id));
-            self.focus(new_id);
-        }
+        let Some(group) = self.groups.remove(&g) else {
+            return;
+        };
+        let tabs = group.root.notes().into_iter().map(Tab::Note).collect();
+        self.replace_tab(Tab::Group(g), tabs);
+        self.focus(group.focus);
         self.mark_dirty();
+    }
+
+    /// Tira uma nota da divisão e a põe numa aba própria, logo depois.
+    fn pop_out(&mut self, id: NoteId) {
+        let Some(g) = self.group_of(id) else {
+            return;
+        };
+        let Some(path) = self.dock.find_tab(&Tab::Group(g)) else {
+            return;
+        };
+        self.detach(id);
+        if let Ok(leaf) = self.dock.leaf_mut(path.node_path()) {
+            let at = (path.tab.0 + 1).min(leaf.len());
+            leaf.insert_tab(at, Tab::Note(id));
+        }
+        self.focus(id);
+        self.mark_dirty();
+    }
+
+    /// Põe a nota `new` no lugar de `old` (na barra ou no painel do grupo).
+    fn swap_note(&mut self, old: NoteId, new: NoteId) {
+        match self.group_of(old) {
+            Some(g) => {
+                if let Some(group) = self.groups.get_mut(&g) {
+                    group.root.replace(old, new);
+                    if group.focus == old {
+                        group.focus = new;
+                    }
+                }
+            }
+            None => self.replace_tab(Tab::Note(old), vec![Tab::Note(new)]),
+        }
     }
 
     fn open_path(&mut self, p: PathBuf) {
@@ -698,10 +890,17 @@ impl App {
                     let an = self.notes.get(&a)?;
                     (an.doc.text.is_empty() && an.file.is_none()).then_some(a)
                 });
-                let at = replace.and_then(|r| self.dock.find_tab(&r).map(|t| t.node_path()));
-                self.add_note(n, at);
-                if let Some(r) = replace {
-                    self.actions.push(Action::Close(r));
+                match replace {
+                    Some(r) => {
+                        self.notes.insert(id, n);
+                        self.swap_note(r, id);
+                        self.focus(id);
+                        self.mark_dirty();
+                        self.actions.push(Action::Close(r));
+                    }
+                    None => {
+                        self.add_note(n);
+                    }
                 }
                 self.toast(format!("Aberto: {}", file_name(&p)));
             }
@@ -743,7 +942,8 @@ impl App {
     // ------------------------------------------------------- persistência
 
     fn session_data(&self) -> SessionData {
-        let mut order: Vec<NoteId> = self.dock.iter_all_tabs().map(|(_, id)| *id).collect();
+        let open = self.open_notes();
+        let mut order = open.clone();
         for id in self.notes.keys() {
             if !order.contains(id) {
                 order.push(*id);
@@ -769,10 +969,31 @@ impl App {
                 .filter_map(|id| self.notes.get(id))
                 .map(|n| n.to_data())
                 .collect(),
-            dock: Some(self.dock.clone()),
+            dock: Some(legacy_dock(open, self.active)),
+            tabs: Some(self.saved_tabs()),
             closed: self.closed.clone(),
             window,
         }
+    }
+
+    fn saved_tabs(&self) -> SavedTabs {
+        let mut active = 0;
+        let current = self.current_tab();
+        let mut tabs = Vec::new();
+        for (_, t) in self.dock.iter_all_tabs() {
+            if Some(*t) == current {
+                active = tabs.len();
+            }
+            match t {
+                Tab::Note(id) => tabs.push(SavedTab::Note(*id)),
+                Tab::Group(g) => {
+                    if let Some(g) = self.groups.get(g) {
+                        tabs.push(SavedTab::Group(g.clone()));
+                    }
+                }
+            }
+        }
+        SavedTabs { tabs, active }
     }
 
     fn save_now(&mut self) {
@@ -931,10 +1152,7 @@ impl App {
     }
 
     fn cycle_tab(&mut self, dir: i32) {
-        let Some(path) = self.dock.focused_leaf() else {
-            return;
-        };
-        let Ok(leaf) = self.dock.leaf(path) else {
+        let Some((_, leaf)) = self.dock.iter_leaves().next() else {
             return;
         };
         let n = leaf.len();
@@ -943,15 +1161,17 @@ impl App {
         }
         let cur = leaf.active.0 as i32;
         let next = (cur + dir).rem_euclid(n as i32) as usize;
-        let id = leaf.tabs()[next];
-        self.focus(id);
+        let tab = leaf.tabs()[next];
+        if let Some(id) = self.tab_note(tab) {
+            self.focus(id);
+        }
     }
 
     // ------------------------------------------------------- interface
 
     /// Botão "+" de cada painel: logo depois da última aba, com respiro e
     /// hover arredondado (o da biblioteca fica colado e tem hover quadrado).
-    fn add_tab_buttons(&mut self, ui: &mut Ui, tab_rects: &HashMap<NoteId, Rect>, c: &Colors) {
+    fn add_tab_buttons(&mut self, ui: &mut Ui, tab_rects: &HashMap<Tab, Rect>, c: &Colors) {
         let mut buttons = Vec::new();
         for (path, leaf) in self.dock.iter_leaves() {
             let rects: Vec<Rect> = leaf.tabs().iter().filter_map(|t| tab_rects.get(t)).copied().collect();
@@ -973,7 +1193,7 @@ impl App {
             let col = if resp.hovered() { c.text } else { c.dim };
             p.text(rect.center(), Align2::CENTER_CENTER, icons::PLUS, icons::font(15.0), col);
             if resp.clicked() {
-                self.actions.push(Action::NewIn(path));
+                self.actions.push(Action::New);
             }
         }
     }
@@ -1222,7 +1442,7 @@ impl App {
 
     fn main_menu(&mut self, button: &egui::Response, c: &Colors) {
         let active = self.active;
-        let split = self.dock.iter_leaves().count() > 1;
+        let split = active.is_some_and(|id| self.group_of(id).is_some());
         egui::Popup::menu(button)
             .align(egui::RectAlign::TOP_END)
             .show(|ui| {
@@ -1259,8 +1479,8 @@ impl App {
                 if menu_item(ui, c, icons::SPLIT_V, "Dividir abaixo", "", has) {
                     self.actions.push(Action::Split(active.unwrap(), Split::Below));
                 }
-                if menu_item(ui, c, icons::MERGE, "Juntar painéis", "", split) {
-                    self.actions.push(Action::Unsplit);
+                if menu_item(ui, c, icons::MERGE, "Desfazer divisão", "", split) {
+                    self.actions.push(Action::Unsplit(active.unwrap()));
                 }
                 ui.separator();
                 let closed_label = (
@@ -1691,7 +1911,7 @@ impl App {
         // Itens: notas abertas (ordem das abas) + fechadas.
         let q = sw.query.to_lowercase();
         let mut items: Vec<SwitchItem> = Vec::new();
-        let open: Vec<NoteId> = self.dock.iter_all_tabs().map(|(_, id)| *id).collect();
+        let open = self.open_notes();
         for id in open {
             if let Some(n) = self.notes.get(&id) {
                 if let Some(snip) = matches_query(&n.title, &n.doc.text, &q) {
@@ -2055,6 +2275,7 @@ impl App {
 
 struct Viewer<'a> {
     notes: &'a mut HashMap<NoteId, Note>,
+    groups: &'a mut HashMap<GroupId, Group>,
     settings: &'a Settings,
     colors: Colors,
     caps: FontCaps,
@@ -2062,92 +2283,39 @@ struct Viewer<'a> {
     actions: &'a mut Vec<Action>,
     changed: &'a mut bool,
     active: &'a mut Option<NoteId>,
-    split: bool,
     now: f64,
-    /// Abas ativas (uma por painel) e a cor de fundo de cada uma.
-    tab_bg: &'a HashMap<NoteId, Color32>,
+    /// Fonte do título das abas (para o título dos grupos, que leva ícone).
+    tab_font: FontId,
+    /// Aba ativa e a cor de fundo dela.
+    tab_bg: &'a HashMap<Tab, Color32>,
     /// Retângulo de cada aba neste frame (para posicionar o "+").
-    tab_rects: &'a mut HashMap<NoteId, Rect>,
+    tab_rects: &'a mut HashMap<Tab, Rect>,
 }
 
-impl TabViewer for Viewer<'_> {
-    type Tab = NoteId;
+/// Altura do cabeçalho de cada painel da tela dividida.
+const PANE_HEADER: f32 = 30.0;
+/// Largura/altura mínima de um painel da tela dividida.
+const MIN_PANE: f32 = 175.0;
 
-    fn id(&mut self, tab: &mut NoteId) -> Id {
-        Id::new(("dn-tab", *tab))
-    }
-
-    fn title(&mut self, tab: &mut NoteId) -> WidgetText {
-        match self.notes.get(tab) {
+impl Viewer<'_> {
+    fn note_title(&self, id: NoteId, max: usize) -> String {
+        match self.notes.get(&id) {
             Some(n) => {
                 let dot = if n.file.is_some() && n.file_dirty { "  •" } else { "" };
-                format!("{}{dot}", short_title(&n.title)).into()
+                format!("{}{dot}", clip_title(&n.title, max))
             }
             None => "?".into(),
         }
     }
 
-    fn on_tab_button(&mut self, tab: &mut NoteId, response: &egui::Response) {
-        let r = response.rect;
-        self.tab_rects.insert(*tab, r);
-        let painter = response.ctx.layer_painter(response.layer_id);
-        let c = self.colors;
-        let pointer = response.ctx.pointer_hover_pos();
-        let active_bg = self.tab_bg.get(tab).copied();
-
-        // Curvas na base da aba ativa: ela "escorre" para dentro do editor,
-        // como as abas do navegador.
-        if let Some(bg) = active_bg {
-            let clip = r.expand2(vec2(TAB_RADIUS + 1.0, 0.0));
-            let fp = painter.with_clip_rect(clip);
-            tab_flare(&fp, pos2(r.left(), r.bottom()), -1.0, bg);
-            tab_flare(&fp, pos2(r.right(), r.bottom()), 1.0, bg);
-        }
-
-        // "×": visível na aba ativa e ao passar o mouse sobre a aba.
-        let close = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(20.0, 20.0));
-        let over_tab = pointer.is_some_and(|p| r.contains(p));
-        let over_close = pointer.is_some_and(|p| close.contains(p));
-        if active_bg.is_some() || over_tab {
-            let cp = painter.with_clip_rect(r);
-            let base = active_bg.unwrap_or_else(|| theme::mix(c.panel, c.text, 0.06));
-            if over_close {
-                cp.rect_filled(close, 6.0, theme::mix(base, c.text, 0.12));
-            }
-            let col = if over_close { c.text } else { c.dim };
-            cp.text(close.center(), Align2::CENTER_CENTER, icons::X, icons::font(13.0), col);
-        }
-
-        // Com a tela dividida, uma linha na cor de destaque marca o painel em foco.
-        if self.split && *self.active == Some(*tab) {
-            let r = response.rect;
-            response.ctx.layer_painter(response.layer_id).hline(
-                r.x_range().shrink(8.0),
-                r.top() + 1.0,
-                Stroke::new(2.0, self.colors.accent),
-            );
-        }
-        if let Some(n) = self.notes.get(tab) {
-            let mut tip = n.title.clone();
-            if let Some(f) = &n.file {
-                tip = format!("{tip}\n{}", f.display());
-            }
-            if n.title.chars().count() > 28 || n.file.is_some() {
-                response.clone().on_hover_text(tip);
-            }
-        }
-        if response.double_clicked() {
-            self.actions.push(Action::Rename(*tab));
-        }
-        if response.clicked() {
-            *self.active = Some(*tab);
-            self.ui.focus_editor = Some(*tab);
-        }
+    fn in_group(&self, id: NoteId) -> bool {
+        self.groups.values().any(|g| g.root.contains(id))
     }
 
-    fn context_menu(&mut self, ui: &mut Ui, tab: &mut NoteId, _path: NodePath) {
-        let id = *tab;
+    /// Menu de uma nota (clique direito na aba ou no cabeçalho do painel).
+    fn note_menu(&mut self, ui: &mut Ui, id: NoteId) {
         let c = self.colors;
+        let grouped = self.in_group(id);
         ui.set_min_width(240.0);
         if menu_item(ui, &c, icons::PENCIL, "Renomear", "Clique duplo", true) {
             self.actions.push(Action::Rename(id));
@@ -2166,9 +2334,15 @@ impl TabViewer for Viewer<'_> {
             self.actions.push(Action::Split(id, Split::Below));
             ui.close();
         }
-        if menu_item(ui, &c, icons::MERGE, "Juntar painéis", "", self.split) {
-            self.actions.push(Action::Unsplit);
-            ui.close();
+        if grouped {
+            if menu_item(ui, &c, icons::FILE_TEXT, "Mover para aba própria", "", true) {
+                self.actions.push(Action::PopOut(id));
+                ui.close();
+            }
+            if menu_item(ui, &c, icons::MERGE, "Desfazer divisão", "", true) {
+                self.actions.push(Action::Unsplit(id));
+                ui.close();
+            }
         }
         ui.separator();
         if menu_item(ui, &c, icons::FLOPPY, "Salvar", "Ctrl+S", true) {
@@ -2199,25 +2373,336 @@ impl TabViewer for Viewer<'_> {
         }
     }
 
-    fn on_close(&mut self, tab: &mut NoteId) -> OnCloseResponse {
-        self.actions.push(Action::Closed(*tab));
+    /// Conteúdo da aba de um grupo: os painéis lado a lado.
+    fn group_ui(&mut self, ui: &mut Ui, g: GroupId) {
+        let Some(group) = self.groups.get(&g) else {
+            ui.label("Divisão não encontrada");
+            return;
+        };
+        let mut root = group.root.clone();
+        let focus = group.focus;
+        let rect = ui.max_rect();
+        self.pane_ui(ui, &mut root, rect, focus, Id::new(("dn-group", g)));
+        let active = *self.active;
+        if let Some(group) = self.groups.get_mut(&g) {
+            // Só a posição dos divisores muda aqui; o resto vem por ações.
+            group.root = root;
+            if let Some(a) = active.filter(|a| group.root.contains(*a)) {
+                group.focus = a;
+            }
+        }
+    }
+
+    fn pane_ui(&mut self, ui: &mut Ui, pane: &mut Pane, rect: Rect, focus: NoteId, salt: Id) {
+        match pane {
+            Pane::Note(id) => self.leaf_ui(ui, *id, rect, *id == focus),
+            Pane::Split {
+                side_by_side,
+                fraction,
+                first,
+                second,
+            } => {
+                let horiz = *side_by_side;
+                let (start, len) = if horiz {
+                    (rect.left(), rect.width())
+                } else {
+                    (rect.top(), rect.height())
+                };
+                let mid = (start + len * *fraction).round();
+                let (r1, line, r2) = if horiz {
+                    (
+                        Rect::from_min_max(rect.min, pos2(mid, rect.bottom())),
+                        Rect::from_min_max(pos2(mid, rect.top()), pos2(mid + 1.0, rect.bottom())),
+                        Rect::from_min_max(pos2(mid + 1.0, rect.top()), rect.max),
+                    )
+                } else {
+                    (
+                        Rect::from_min_max(rect.min, pos2(rect.right(), mid)),
+                        Rect::from_min_max(pos2(rect.left(), mid), pos2(rect.right(), mid + 1.0)),
+                        Rect::from_min_max(pos2(rect.left(), mid + 1.0), rect.max),
+                    )
+                };
+                self.pane_ui(ui, first, r1, focus, salt.with(1));
+                self.pane_ui(ui, second, r2, focus, salt.with(2));
+
+                // Divisor: depois dos painéis, para ficar por cima na hora do clique.
+                let hit = if horiz {
+                    line.expand2(vec2(6.0, 0.0))
+                } else {
+                    line.expand2(vec2(0.0, 6.0))
+                };
+                let resp = ui
+                    .interact(hit, salt.with("dn-divider"), Sense::click_and_drag())
+                    .on_hover_cursor(if horiz {
+                        egui::CursorIcon::ResizeHorizontal
+                    } else {
+                        egui::CursorIcon::ResizeVertical
+                    });
+                if resp.dragged() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        let at = if horiz { p.x } else { p.y } - start;
+                        let min = if len > 2.0 * MIN_PANE { MIN_PANE / len } else { 0.5 };
+                        *fraction = (at / len.max(1.0)).clamp(min, 1.0 - min);
+                        *self.changed = true;
+                    }
+                }
+                if resp.double_clicked() {
+                    *fraction = 0.5;
+                    *self.changed = true;
+                }
+                let c = self.colors;
+                let col = if resp.hovered() || resp.dragged() {
+                    c.accent
+                } else {
+                    theme::mix(c.border, c.text, 0.08)
+                };
+                ui.painter().rect_filled(line, 0.0, col);
+            }
+        }
+    }
+
+    /// Um painel da tela dividida: cabeçalho com o nome da nota e o editor.
+    fn leaf_ui(&mut self, ui: &mut Ui, id: NoteId, rect: Rect, focused: bool) {
+        let c = self.colors;
+        let head = Rect::from_min_size(rect.min, vec2(rect.width(), PANE_HEADER));
+        let body = Rect::from_min_max(pos2(rect.left(), head.bottom()), rect.max);
+
+        // Clicar em qualquer ponto do painel o põe em foco.
+        let pressed = ui.rect_contains_pointer(rect)
+            && ui.input(|i| i.pointer.primary_pressed() || i.pointer.secondary_pressed());
+        if pressed && *self.active != Some(id) {
+            *self.active = Some(id);
+        }
+
+        // Cabeçalho
+        let p = ui.painter_at(head);
+        let bg = if focused { c.bg } else { theme::mix(c.bg, c.panel, 0.45) };
+        p.rect_filled(head, 0.0, bg);
+        p.hline(
+            head.x_range(),
+            head.bottom() - 0.5,
+            Stroke::new(1.0, theme::mix(c.border, c.text, 0.04)),
+        );
+        if focused {
+            p.hline(head.x_range().shrink(8.0), head.top() + 1.0, Stroke::new(2.0, c.accent));
+        }
+        let resp = ui
+            .interact(head, Id::new(("dn-pane-head", id)), Sense::click())
+            .on_hover_text("Clique duplo para renomear");
+        let close = Rect::from_center_size(pos2(head.right() - 18.0, head.center().y), vec2(22.0, 22.0));
+        let close_resp = ui
+            .interact(close, Id::new(("dn-pane-close", id)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Fechar nota (Ctrl+W)");
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let title_clip = Rect::from_min_max(head.min, pos2(close.left() - 4.0, head.bottom()));
+        ui.painter_at(title_clip).text(
+            pos2(head.left() + 14.0, head.center().y),
+            Align2::LEFT_CENTER,
+            self.note_title(id, 40),
+            font,
+            if focused { c.text } else { c.dim },
+        );
+        if close_resp.hovered() {
+            p.rect_filled(close, 6.0, theme::mix(bg, c.text, 0.12));
+        }
+        let col = if close_resp.hovered() { c.text } else { c.dim };
+        p.text(close.center(), Align2::CENTER_CENTER, icons::X, icons::font(13.0), col);
+
+        if close_resp.clicked() {
+            self.actions.push(Action::Close(id));
+        } else if resp.double_clicked() {
+            self.actions.push(Action::Rename(id));
+        } else if resp.clicked() {
+            *self.active = Some(id);
+            self.ui.focus_editor = Some(id);
+        }
+        resp.context_menu(|ui| self.note_menu(ui, id));
+
+        // Editor
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(body)
+                .layout(*ui.layout())
+                .id_salt(("dn-pane", id)),
+        );
+        child.set_clip_rect(body.intersect(ui.clip_rect()));
+        self.note_ui(&mut child, id);
+    }
+}
+
+impl TabViewer for Viewer<'_> {
+    type Tab = Tab;
+
+    fn id(&mut self, tab: &mut Tab) -> Id {
+        Id::new(("dn-tab", *tab))
+    }
+
+    fn title(&mut self, tab: &mut Tab) -> WidgetText {
+        match *tab {
+            Tab::Note(id) => self.note_title(id, 28).into(),
+            Tab::Group(g) => {
+                let ids = self.groups.get(&g).map(|g| g.root.notes()).unwrap_or_default();
+                let max = if ids.len() > 2 { 12 } else { 18 };
+                let names: Vec<String> = ids.iter().map(|id| self.note_title(*id, max)).collect();
+                // Cor "placeholder": o egui_dock pinta com a cor do estado da aba.
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    icons::SPLIT_H,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: icons::font(14.0),
+                        color: Color32::PLACEHOLDER,
+                        valign: Align::Center,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    &names.join("  |  "),
+                    8.0,
+                    egui::TextFormat {
+                        font_id: self.tab_font.clone(),
+                        color: Color32::PLACEHOLDER,
+                        valign: Align::Center,
+                        ..Default::default()
+                    },
+                );
+                job.into()
+            }
+        }
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        let r = response.rect;
+        self.tab_rects.insert(*tab, r);
+        let painter = response.ctx.layer_painter(response.layer_id);
+        let c = self.colors;
+        let pointer = response.ctx.pointer_hover_pos();
+        let active_bg = self.tab_bg.get(tab).copied();
+
+        // Curvas na base da aba ativa: ela "escorre" para dentro do editor,
+        // como as abas do navegador.
+        if let Some(bg) = active_bg {
+            let clip = r.expand2(vec2(TAB_RADIUS + 1.0, 0.0));
+            let fp = painter.with_clip_rect(clip);
+            tab_flare(&fp, pos2(r.left(), r.bottom()), -1.0, bg);
+            tab_flare(&fp, pos2(r.right(), r.bottom()), 1.0, bg);
+        }
+
+        // "×": visível na aba ativa e ao passar o mouse sobre a aba.
+        let close = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(20.0, 20.0));
+        let over_tab = pointer.is_some_and(|p| r.contains(p));
+        let over_close = pointer.is_some_and(|p| close.contains(p));
+        if active_bg.is_some() || over_tab {
+            let cp = painter.with_clip_rect(r);
+            let base = active_bg.unwrap_or_else(|| theme::mix(c.panel, c.text, 0.06));
+            if over_close {
+                cp.rect_filled(close, 6.0, theme::mix(base, c.text, 0.12));
+            }
+            let col = if over_close { c.text } else { c.dim };
+            cp.text(close.center(), Align2::CENTER_CENTER, icons::X, icons::font(13.0), col);
+        }
+
+        match *tab {
+            Tab::Note(id) => {
+                if let Some(n) = self.notes.get(&id) {
+                    let mut tip = n.title.clone();
+                    if let Some(f) = &n.file {
+                        tip = format!("{tip}\n{}", f.display());
+                    }
+                    if n.title.chars().count() > 28 || n.file.is_some() {
+                        response.clone().on_hover_text(tip);
+                    }
+                }
+                if response.double_clicked() {
+                    self.actions.push(Action::Rename(id));
+                }
+                if response.clicked() {
+                    *self.active = Some(id);
+                    self.ui.focus_editor = Some(id);
+                }
+            }
+            Tab::Group(g) => {
+                if let Some(group) = self.groups.get(&g) {
+                    let names: Vec<String> = group
+                        .root
+                        .notes()
+                        .iter()
+                        .filter_map(|id| self.notes.get(id).map(|n| n.title.clone()))
+                        .collect();
+                    response.clone().on_hover_text(format!(
+                        "Tela dividida\n{}\n\nClique direito para desfazer a divisão",
+                        names.join("\n")
+                    ));
+                    if response.clicked() {
+                        *self.active = Some(group.focus);
+                        self.ui.focus_editor = Some(group.focus);
+                    }
+                }
+            }
+        }
+    }
+
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, _path: NodePath) {
+        match *tab {
+            Tab::Note(id) => self.note_menu(ui, id),
+            Tab::Group(g) => {
+                let c = self.colors;
+                let Some(focus) = self.groups.get(&g).map(|g| g.focus) else {
+                    return;
+                };
+                ui.set_min_width(240.0);
+                if menu_item(ui, &c, icons::MERGE, "Desfazer divisão", "", true) {
+                    self.actions.push(Action::Unsplit(focus));
+                    ui.close();
+                }
+                if menu_item(ui, &c, icons::SPLIT_H, "Dividir à direita", "", true) {
+                    self.actions.push(Action::Split(focus, Split::Right));
+                    ui.close();
+                }
+                if menu_item(ui, &c, icons::SPLIT_V, "Dividir abaixo", "", true) {
+                    self.actions.push(Action::Split(focus, Split::Below));
+                    ui.close();
+                }
+                ui.separator();
+                if menu_item(ui, &c, icons::X, "Fechar todas as notas da divisão", "", true) {
+                    self.actions.push(Action::CloseGroup(g));
+                    ui.close();
+                }
+            }
+        }
+    }
+
+    fn on_close(&mut self, tab: &mut Tab) -> OnCloseResponse {
+        match *tab {
+            Tab::Note(id) => self.actions.push(Action::Closed(id)),
+            Tab::Group(g) => self.actions.push(Action::CloseGroup(g)),
+        }
         OnCloseResponse::Close
     }
 
-    fn on_add(&mut self, path: NodePath) {
-        self.actions.push(Action::NewIn(path));
+    fn on_add(&mut self, _path: NodePath) {
+        self.actions.push(Action::New);
     }
 
-    fn allowed_in_windows(&self, _tab: &mut NoteId) -> bool {
+    fn allowed_in_windows(&self, _tab: &mut Tab) -> bool {
         false
     }
 
-    fn scroll_bars(&self, _tab: &NoteId) -> [bool; 2] {
+    fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
         [false, false]
     }
 
-    fn ui(&mut self, ui: &mut Ui, tab: &mut NoteId) {
-        let id = *tab;
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Tab) {
+        match *tab {
+            Tab::Note(id) => self.note_ui(ui, id),
+            Tab::Group(g) => self.group_ui(ui, g),
+        }
+    }
+}
+
+impl Viewer<'_> {
+    fn note_ui(&mut self, ui: &mut Ui, id: NoteId) {
         if !self.notes.contains_key(&id) {
             ui.label("Nota não encontrada");
             return;
@@ -3252,6 +3737,84 @@ fn sanitize(s: &str) -> String {
     if s.is_empty() { "Nota".into() } else { s }
 }
 
+/// Barra de abas com uma faixa só.
+fn new_dock(tabs: Vec<Tab>, active: usize) -> DockState<Tab> {
+    let n = tabs.len();
+    let mut d = DockState::new(tabs);
+    if n > 0 {
+        let _ = d
+            .main_surface_mut()
+            .set_active_tab(NodeIndex::root(), TabIndex(active.min(n - 1)));
+    }
+    d.translations = translations();
+    d
+}
+
+/// Layout no formato das versões até 0.4 (todas as notas numa faixa), gravado
+/// junto para que uma versão antiga ainda abra a sessão.
+fn legacy_dock(open: Vec<NoteId>, active: Option<NoteId>) -> DockState<NoteId> {
+    let at = active.and_then(|a| open.iter().position(|id| *id == a)).unwrap_or(0);
+    let n = open.len();
+    let mut d = DockState::new(open);
+    if n > 0 {
+        let _ = d
+            .main_surface_mut()
+            .set_active_tab(NodeIndex::root(), TabIndex(at.min(n - 1)));
+    }
+    d
+}
+
+/// Monta a faixa de abas a partir de uma árvore do egui_dock, dobrando as
+/// divisões num grupo. Devolve as abas e o índice da aba ativa (a do grupo).
+fn tabs_from_dock(
+    tree: &egui_dock::Tree<Tab>,
+    groups: &mut HashMap<GroupId, Group>,
+    next_group: &mut GroupId,
+    focus: Option<NoteId>,
+) -> (Vec<Tab>, usize) {
+    let mut merged = Vec::new();
+    let (root, order) = panes::fold(tree, &mut |t| match t {
+        Tab::Note(id) => Some(Pane::Note(id)),
+        Tab::Group(g) => {
+            let p = groups.get(&g).map(|g| g.root.clone());
+            if p.is_some() {
+                merged.push(g);
+            }
+            p
+        }
+    });
+    let old_focus = merged.first().and_then(|g| groups.get(g)).map(|g| g.focus);
+    for g in &merged {
+        groups.remove(g);
+    }
+    let mut tabs = Vec::new();
+    let mut active = 0;
+    for slot in order {
+        match slot {
+            Slot::Tab(t) => tabs.push(t),
+            Slot::Group => match &root {
+                Some(Pane::Note(id)) => {
+                    active = tabs.len();
+                    tabs.push(Tab::Note(*id));
+                }
+                Some(r) => {
+                    active = tabs.len();
+                    let f = focus
+                        .filter(|f| r.contains(*f))
+                        .or(old_focus)
+                        .unwrap_or_else(|| r.first_note());
+                    let g = *next_group;
+                    *next_group += 1;
+                    groups.insert(g, Group::new(r.clone(), f));
+                    tabs.push(Tab::Group(g));
+                }
+                None => {}
+            },
+        }
+    }
+    (tabs, active)
+}
+
 // ============================================================== eframe::App
 
 impl eframe::App for App {
@@ -3285,8 +3848,8 @@ impl eframe::App for App {
                 }
                 let style = self.dock_style(&c);
                 let mut changed = false;
-                let split = self.dock.iter_leaves().count() > 1;
                 // Cor de fundo da aba ativa de cada painel (a do painel em foco é a do editor).
+                let split = self.dock.iter_leaves().count() > 1;
                 let focused_leaf = self.dock.focused_leaf();
                 let unfocused_bg = theme::mix(c.bg, c.panel, 0.45);
                 let mut tab_bg = HashMap::new();
@@ -3297,8 +3860,10 @@ impl eframe::App for App {
                     }
                 }
                 let mut tab_rects = HashMap::new();
+                let tab_font = egui::TextStyle::Button.resolve(ui.style());
                 let mut viewer = Viewer {
                     notes: &mut self.notes,
+                    groups: &mut self.groups,
                     settings: &self.settings,
                     colors: c,
                     caps: self.caps,
@@ -3306,8 +3871,8 @@ impl eframe::App for App {
                     actions: &mut self.actions,
                     changed: &mut changed,
                     active: &mut self.active,
-                    split,
                     now,
+                    tab_font,
                     tab_bg: &tab_bg,
                     tab_rects: &mut tab_rects,
                 };
@@ -3326,7 +3891,12 @@ impl eframe::App for App {
                 if changed {
                     self.mark_dirty();
                 }
-                if let Some(id) = self.dock.find_active_focused().map(|(_, t)| *t) {
+                let split = self.dock.iter_leaves().count() > 1;
+                if split {
+                    // Uma aba foi arrastada para a lateral: a divisão vira um grupo.
+                    self.fold_splits();
+                    ctx.request_repaint();
+                } else if let Some(id) = self.focused_note() {
                     self.active = Some(id);
                 }
                 self.add_tab_buttons(ui, &tab_rects, &c);

@@ -8,6 +8,7 @@ mod fonts;
 mod icon;
 mod icons;
 mod ipc;
+mod panes;
 mod platform;
 mod storage;
 mod theme;
